@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900;
+  }
+
+  * {
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  /* Botón primario */
+  .btn-primary {
+    @apply bg-brand-500 text-white font-semibold py-3 px-6 rounded-xl
+           active:scale-95 transition-transform duration-100
+           disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2;
+  }
+
+  /* Botón secundario */
+  .btn-secondary {
+    @apply bg-white text-brand-500 font-semibold py-3 px-6 rounded-xl
+           border border-brand-500
+           active:scale-95 transition-transform duration-100
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* Botón de peligro */
+  .btn-danger {
+    @apply bg-danger-500 text-white font-semibold py-2 px-4 rounded-xl
+           active:scale-95 transition-transform duration-100;
+  }
+
+  /* Input de formulario */
+  .input-field {
+    @apply w-full px-4 py-3 border border-slate-200 rounded-xl bg-white
+           text-slate-900 placeholder-slate-400
+           focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
+           transition-shadow duration-200;
+  }
+
+  /* Label de formulario */
+  .input-label {
+    @apply block text-sm font-medium text-slate-700 mb-1;
+  }
+
+  /* Tarjeta */
+  .card {
+    @apply bg-white rounded-2xl shadow-sm border border-slate-100 p-4;
+  }
+
+  /* Badge precio más bajo */
+  .badge-lowest {
+    @apply inline-flex items-center gap-1 bg-success-50 text-success-600
+           text-xs font-semibold px-2 py-0.5 rounded-full;
+  }
+
+  /* Badge pendiente */
+  .badge-pending {
+    @apply inline-flex items-center bg-warning-50 text-warning-600
+           text-xs font-semibold px-2 py-0.5 rounded-full;
+  }
+
+  /* Badge aprobado */
+  .badge-approved {
+    @apply inline-flex items-center bg-success-50 text-success-600
+           text-xs font-semibold px-2 py-0.5 rounded-full;
+  }
+
+  /* Badge rechazado */
+  .badge-rejected {
+    @apply inline-flex items-center bg-danger-50 text-danger-500
+           text-xs font-semibold px-2 py-0.5 rounded-full;
+  }
+}
+
+/* Pulso suave para precio mínimo */
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.3); }
+  50%       { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+}
+
+.animate-pulse-green {
+  animation: pulse-green 2s ease-in-out infinite;
+}
+
+/* Transición de página */
+.page-enter {
+  animation: fadeUp 0.2s ease-out;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Safe area para notch de iPhone */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

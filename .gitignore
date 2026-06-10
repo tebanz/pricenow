@@ -1,0 +1,14 @@
+node_modules
+dist
+.env
+.env.local
+.DS_Store
+.vscode
+.env
+node_modules/
+dist/
+.env node_modules/ dist/
+.env
+.env
+node_modules/
+dist/
