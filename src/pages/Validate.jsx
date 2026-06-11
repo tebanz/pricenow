@@ -1,517 +1,177 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import {
-  formatCLP,
-  formatUnitPrice,
-  SECTORES_RANCAGUA,
-  UNIDADES,
-} from '../utils/priceCalc'
-import Spinner from '../components/UI/Spinner'
 
-const STATUS_FILTERS = [
-  { value: 'pending', label: 'Pendientes' },
-  { value: 'approved', label: 'Aprobadas' },
-  { value: 'rejected', label: 'Rechazadas' },
-  { value: 'all', label: 'Todas' },
-]
-
-const STATUS_LABELS = {
-  pending: 'Pendiente',
-  approved: 'Aprobada',
-  rejected: 'Rechazada',
+function normalize(text = '') {
+  return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 }
 
-const STATUS_BADGES = {
-  pending: 'badge-pending',
-  approved: 'badge-approved',
-  rejected: 'badge-rejected',
+function sim(a, b) {
+  const A = new Set(normalize(a).split(' ').filter(Boolean))
+  const B = new Set(normalize(b).split(' ').filter(Boolean))
+  if (!A.size || !B.size) return 0
+  let same = 0
+  A.forEach(x => { if (B.has(x)) same += 1 })
+  return same / Math.max(A.size, B.size)
+}
+
+function money(value) {
+  return Number(value || 0).toLocaleString('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 })
 }
 
 export default function Validate() {
-  const { user } = useAuth()
+  const { user, isValidator } = useAuth()
+  const [tab, setTab] = useState('pending')
   const [entries, setEntries] = useState([])
+  const [products, setProducts] = useState([])
+  const [stores, setStores] = useState([])
   const [loading, setLoading] = useState(true)
-  const [processing, setProcessing] = useState(null)
-  const [rejectReason, setRejectReason] = useState({})
-  const [showReject, setShowReject] = useState(null)
-  const [statusFilter, setStatusFilter] = useState('pending')
-  const [editEntry, setEditEntry] = useState(null)
-  const [editForm, setEditForm] = useState(null)
-  const [error, setError] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState(null)
 
-  const loadEntries = useCallback(async () => {
+  async function load() {
     setLoading(true)
-    setError(null)
+    setMessage(null)
 
-    let query = supabase
-      .from('price_entries')
-      .select(`
-        id, product_name, brand, quantity, unit,
-        price, unit_price, store_name, sector,
-        purchase_date, receipt_photo_url, notes,
-        validation_status, rejection_reason, created_at,
-        profiles!user_id (username)
-      `)
-      .order('created_at', { ascending: false })
-      .limit(100)
+    const [entriesRes, productsRes, storesRes] = await Promise.all([
+      // No usamos embedding profiles(username) porque price_entries tiene más de una relación con profiles
+      // (user_id y validated_by). Eso genera error PGRST201 en Supabase.
+      supabase.from('price_entries').select('*').order('created_at', { ascending: false }).limit(150),
+      supabase.from('products').select('*').eq('is_active', true).limit(700),
+      supabase.from('stores').select('*').eq('is_active', true).limit(700),
+    ])
 
-    if (statusFilter !== 'all') {
-      query = query.eq('validation_status', statusFilter)
-    }
-
-    const { data, error } = await query
-
-    if (error) {
-      setError(error.message)
+    if (entriesRes.error || productsRes.error || storesRes.error) {
+      setMessage({ type: 'error', text: entriesRes.error?.message || productsRes.error?.message || storesRes.error?.message })
       setEntries([])
-    } else {
-      setEntries(data ?? [])
+      setProducts([])
+      setStores([])
+      setLoading(false)
+      return
     }
 
+    const rawEntries = entriesRes.data || []
+    const userIds = [...new Set(rawEntries.map(entry => entry.user_id).filter(Boolean))]
+    let profileMap = {}
+
+    if (userIds.length) {
+      const { data: profileRows, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, username')
+        .in('id', userIds)
+
+      if (!profilesError) {
+        profileMap = Object.fromEntries((profileRows || []).map(row => [row.id, row.username]))
+      }
+    }
+
+    setEntries(rawEntries.map(entry => ({
+      ...entry,
+      profile_username: profileMap[entry.user_id] || 'usuario',
+    })))
+    setProducts(productsRes.data || [])
+    setStores(storesRes.data || [])
     setLoading(false)
-  }, [statusFilter])
-
-  useEffect(() => { loadEntries() }, [loadEntries])
-
-  function statusBadge(status) {
-    return (
-      <span className={STATUS_BADGES[status] ?? 'badge-pending'}>
-        {STATUS_LABELS[status] ?? status}
-      </span>
-    )
   }
 
-  async function approve(id) {
-    setProcessing(id)
-    setError(null)
+  useEffect(() => { load() }, [])
 
-    const { error } = await supabase
-      .from('price_entries')
-      .update({
-        validation_status: 'approved',
-        validated_by: user.id,
-        validated_at: new Date().toISOString(),
-        rejection_reason: null,
-      })
-      .eq('id', id)
-      .eq('validation_status', 'pending')
+  const filtered = useMemo(() => entries.filter(e => tab === 'all' || e.validation_status === tab), [entries, tab])
 
-    if (error) setError(error.message)
-    await loadEntries()
-    setProcessing(null)
+  function suggestions(entry) {
+    const product = products.map(p => ({ ...p, score: sim(entry.product_name, p.name) })).sort((a, b) => b.score - a.score)[0]
+    const store = stores.map(s => ({ ...s, score: sim(`${entry.store_name} ${entry.sector}`, `${s.name} ${s.sector}`) })).sort((a, b) => b.score - a.score)[0]
+    return { product, store }
   }
 
-  async function reject(id) {
-    const reason = rejectReason[id]?.trim()
-    if (!reason) { alert('Escribe un motivo de rechazo.'); return }
-
-    setProcessing(id)
-    setError(null)
-
-    const { error } = await supabase
-      .from('price_entries')
-      .update({
-        validation_status: 'rejected',
-        validated_by: user.id,
-        validated_at: new Date().toISOString(),
-        rejection_reason: reason,
-      })
-      .eq('id', id)
-      .eq('validation_status', 'pending')
-
-    if (error) setError(error.message)
-    await loadEntries()
-    setProcessing(null)
-    setShowReject(null)
-  }
-
-  function openEdit(entry) {
-    setEditEntry(entry)
-    setEditForm({
-      product_name: entry.product_name ?? '',
-      brand: entry.brand ?? '',
-      quantity: String(entry.quantity ?? ''),
-      unit: entry.unit ?? 'unidad',
-      price: String(entry.price ?? ''),
-      store_name: entry.store_name ?? '',
-      sector: entry.sector ?? '',
-      purchase_date: entry.purchase_date ?? new Date().toISOString().slice(0, 10),
-      notes: entry.notes ?? '',
-      validation_status: entry.validation_status ?? 'pending',
-      rejection_reason: entry.rejection_reason ?? '',
-    })
-  }
-
-  function closeEdit() {
-    setEditEntry(null)
-    setEditForm(null)
-  }
-
-  function updateEditField(name, value) {
-    setEditForm(prev => ({ ...prev, [name]: value }))
-  }
-
-  function validateEditForm() {
-    if (!editForm.product_name.trim()) return 'El producto es obligatorio.'
-    if (!editForm.quantity || parseFloat(editForm.quantity) <= 0) return 'La cantidad debe ser mayor a 0.'
-    if (!editForm.price || parseFloat(editForm.price) <= 0) return 'El precio debe ser mayor a 0.'
-    if (!editForm.store_name.trim()) return 'La tienda es obligatoria.'
-    if (!editForm.sector) return 'El sector es obligatorio.'
-    if (!editForm.purchase_date) return 'La fecha es obligatoria.'
-    if (editForm.validation_status === 'rejected' && !editForm.rejection_reason.trim()) {
-      return 'Si dejas la solicitud como rechazada, debes escribir motivo.'
+  async function approve(entry, apply = false) {
+    const { product, store } = suggestions(entry)
+    const patch = { validation_status: 'approved', validated_by: user?.id || null, validated_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+    if (apply && product?.score >= 0.34) {
+      patch.product_id = product.id
+      patch.product_name = product.name
+      patch.unit = product.default_unit || entry.unit
     }
-    return null
-  }
-
-  async function saveEdit() {
-    const validationError = validateEditForm()
-    if (validationError) { alert(validationError); return }
-
-    setProcessing(editEntry.id)
-    setError(null)
-
-    const payload = {
-      product_name: editForm.product_name.trim(),
-      brand: editForm.brand.trim() || null,
-      quantity: parseFloat(editForm.quantity),
-      unit: editForm.unit,
-      price: parseFloat(editForm.price),
-      store_name: editForm.store_name.trim(),
-      sector: editForm.sector,
-      purchase_date: editForm.purchase_date,
-      notes: editForm.notes.trim() || null,
-      validation_status: editForm.validation_status,
-      validated_by: user.id,
-      validated_at: new Date().toISOString(),
-      rejection_reason:
-        editForm.validation_status === 'rejected'
-          ? editForm.rejection_reason.trim()
-          : null,
+    if (apply && store?.score >= 0.34) {
+      patch.store_id = store.id
+      patch.store_name = store.name
+      patch.sector = store.sector || entry.sector
     }
-
-    const { error } = await supabase
-      .from('price_entries')
-      .update(payload)
-      .eq('id', editEntry.id)
-
-    if (error) {
-      setError(error.message)
-    } else {
-      closeEdit()
-      await loadEntries()
-    }
-
-    setProcessing(null)
+    setSaving(true)
+    const { error } = await supabase.from('price_entries').update(patch).eq('id', entry.id)
+    setSaving(false)
+    if (error) return setMessage({ type: 'error', text: error.message })
+    setMessage({ type: 'ok', text: apply ? 'Reporte aprobado con correcciones.' : 'Reporte aprobado.' })
+    await load()
   }
 
-  async function getPhotoUrl(path) {
-    const { data } = await supabase.storage
-      .from('receipts')
-      .createSignedUrl(path, 3600)
-    if (data?.signedUrl) window.open(data.signedUrl, '_blank')
+  async function reject(entry) {
+    const reason = window.prompt('Motivo del rechazo:', 'Dato incorrecto o incompleto')
+    if (reason === null) return
+    setSaving(true)
+    const { error } = await supabase.from('price_entries').update({ validation_status: 'rejected', rejection_reason: reason, validated_by: user?.id || null, validated_at: new Date().toISOString() }).eq('id', entry.id)
+    setSaving(false)
+    if (error) return setMessage({ type: 'error', text: error.message })
+    setMessage({ type: 'ok', text: 'Reporte rechazado.' })
+    await load()
   }
 
-  if (loading) return <Spinner />
+  if (!isValidator) return <div className="rounded-3xl bg-white p-5 shadow-sm">Solo admin o validador puede entrar.</div>
 
   return (
-    <div className="px-4 py-5 max-w-lg mx-auto">
-      <div className="flex items-center justify-between mb-1">
-        <h2 className="text-xl font-bold text-slate-900">Panel de validación</h2>
-        <span className="badge-pending">{entries.length} registros</span>
-      </div>
-      <p className="text-sm text-slate-500 mb-4">
-        Revisa, aprueba, rechaza o corrige aportes de la comunidad.
-      </p>
-
-      {error && (
-        <div className="bg-danger-50 border border-danger-500/30 text-danger-500 text-sm rounded-xl p-3 mb-4">
-          {error}
+    <div className="space-y-5 pb-32">
+      <section className="rounded-[2rem] bg-white p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900">Validación inteligente</h1>
+            <p className="mt-1 text-sm text-slate-500">Aprueba, corrige productos mal escritos y asocia negocios reales antes de guardar datos definitivos.</p>
+          </div>
+          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">{filtered.length} registros</span>
         </div>
-      )}
-
-      <div className="grid grid-cols-4 gap-2 mb-5">
-        {STATUS_FILTERS.map(filter => (
-          <button
-            key={filter.value}
-            onClick={() => setStatusFilter(filter.value)}
-            className={`text-xs font-semibold rounded-xl px-2 py-2 border transition-colors ${
-              statusFilter === filter.value
-                ? 'bg-brand-500 text-white border-brand-500'
-                : 'bg-white text-slate-500 border-slate-200'
-            }`}
-          >
-            {filter.label}
-          </button>
-        ))}
-      </div>
-
-      {entries.length === 0 && (
-        <div className="card text-center py-10">
-          <p className="text-3xl mb-2">🎉</p>
-          <p className="text-slate-600 font-semibold">No hay registros para este filtro.</p>
-          <p className="text-slate-400 text-sm mt-1">Cambia el filtro para ver otras solicitudes.</p>
+        <div className="mt-4 grid grid-cols-4 gap-2 rounded-2xl bg-slate-100 p-1 text-xs font-black">
+          {['pending','approved','rejected','all'].map(item => <button key={item} onClick={() => setTab(item)} className={`rounded-xl py-2 ${tab === item ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500'}`}>{item === 'pending' ? 'Pendientes' : item === 'approved' ? 'Aprobadas' : item === 'rejected' ? 'Rechazadas' : 'Todas'}</button>)}
         </div>
-      )}
+      </section>
 
-      <div className="space-y-4">
-        {entries.map(entry => (
-          <div key={entry.id} className="card border border-slate-200 space-y-3">
-            <div className="flex justify-between items-start gap-3">
-              <div className="min-w-0">
-                <p className="font-bold text-slate-800 truncate">
-                  {entry.product_name}
-                  {entry.brand && <span className="text-slate-400 font-normal"> · {entry.brand}</span>}
-                </p>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  por @{entry.profiles?.username ?? 'usuario'} · {entry.purchase_date}
-                </p>
+      {message && <div className={`rounded-2xl border p-3 text-sm font-semibold ${message.type === 'error' ? 'border-red-100 bg-red-50 text-red-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>{message.text}</div>}
+      {loading && <div className="rounded-3xl bg-white p-6 text-center text-sm text-slate-500 shadow-sm">Cargando...</div>}
+
+      <div className="space-y-3">
+        {filtered.map(entry => {
+          const { product, store } = suggestions(entry)
+          return (
+            <div key={entry.id} className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="font-black text-slate-900">{entry.product_name} {entry.brand && <span className="font-normal text-slate-400">· {entry.brand}</span>}</h2>
+                  <p className="text-xs text-slate-500">por @{entry.profile_username || 'usuario'} · {entry.purchase_date}</p>
+                </div>
+                <span className={`rounded-full px-2 py-1 text-[11px] font-bold ${entry.validation_status === 'approved' ? 'bg-emerald-50 text-emerald-700' : entry.validation_status === 'rejected' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>{entry.validation_status}</span>
               </div>
-              {statusBadge(entry.validation_status)}
-            </div>
 
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div className="bg-slate-50 rounded-lg p-2">
-                <p className="text-xs text-slate-400">Precio</p>
-                <p className="font-bold text-brand-500">{formatCLP(entry.price)}</p>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Precio</p><b>{money(entry.price)}</b></div>
+                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Unitario</p><b>{money(entry.unit_price)} / {entry.unit}</b></div>
+                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Cantidad</p><b>{entry.quantity} {entry.unit}</b></div>
+                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Tienda</p><b>{entry.store_name}</b></div>
               </div>
-              <div className="bg-slate-50 rounded-lg p-2">
-                <p className="text-xs text-slate-400">Precio unitario</p>
-                <p className="font-bold text-slate-700 text-xs">
-                  {formatUnitPrice(entry.unit_price, entry.unit)}
-                </p>
+
+              <div className="mt-3 rounded-2xl bg-blue-50 p-3 text-sm text-blue-800">
+                <p><b>Producto sugerido:</b> {product?.score >= 0.34 ? `${product.name} · ${product.default_unit} (${Math.round(product.score * 100)}%)` : 'Sin sugerencia clara'}</p>
+                <p className="mt-1"><b>Negocio sugerido:</b> {store?.score >= 0.34 ? `${store.name} · ${store.sector} (${Math.round(store.score * 100)}%)` : 'Sin sugerencia clara'}</p>
               </div>
-              <div className="bg-slate-50 rounded-lg p-2">
-                <p className="text-xs text-slate-400">Cantidad</p>
-                <p className="font-semibold text-slate-700">{entry.quantity} {entry.unit}</p>
-              </div>
-              <div className="bg-slate-50 rounded-lg p-2">
-                <p className="text-xs text-slate-400">Tienda</p>
-                <p className="font-semibold text-slate-700 text-xs truncate">{entry.store_name}</p>
-              </div>
-            </div>
-
-            <div className="text-xs text-slate-500">
-              <span className="font-medium">Sector:</span> {entry.sector}
-              {entry.notes && <span className="ml-3"><span className="font-medium">Nota:</span> {entry.notes}</span>}
-              {entry.rejection_reason && (
-                <p className="mt-1 text-danger-500">
-                  <span className="font-medium">Motivo rechazo:</span> {entry.rejection_reason}
-                </p>
-              )}
-            </div>
-
-            {entry.receipt_photo_url && (
-              <button
-                onClick={() => getPhotoUrl(entry.receipt_photo_url)}
-                className="flex items-center gap-2 text-brand-500 text-sm font-medium"
-              >
-                Ver foto de boleta
-              </button>
-            )}
-
-            {showReject === entry.id && entry.validation_status === 'pending' && (
-              <textarea
-                placeholder="Motivo del rechazo (obligatorio)"
-                value={rejectReason[entry.id] ?? ''}
-                onChange={e => setRejectReason(prev => ({ ...prev, [entry.id]: e.target.value }))}
-                rows={2}
-                className="input-field text-sm resize-none"
-              />
-            )}
-
-            <div className="flex gap-2 pt-1">
-              <button
-                onClick={() => openEdit(entry)}
-                className="flex-1 bg-slate-100 text-slate-700 font-semibold py-2.5 rounded-xl text-sm active:scale-95 transition-transform"
-              >
-                Editar
-              </button>
 
               {entry.validation_status === 'pending' && (
-                <>
-                  <button
-                    onClick={() => approve(entry.id)}
-                    disabled={processing === entry.id}
-                    className="flex-1 bg-success-500 text-white font-semibold py-2.5 rounded-xl text-sm active:scale-95 transition-transform disabled:opacity-50"
-                  >
-                    {processing === entry.id ? '…' : '✓ Aprobar'}
-                  </button>
-
-                  {showReject === entry.id ? (
-                    <button
-                      onClick={() => reject(entry.id)}
-                      disabled={processing === entry.id}
-                      className="flex-1 btn-danger text-sm py-2.5"
-                    >
-                      Confirmar rechazo
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => setShowReject(entry.id)}
-                      className="flex-1 bg-slate-100 text-slate-600 font-semibold py-2.5 rounded-xl text-sm active:scale-95 transition-transform"
-                    >
-                      ✕ Rechazar
-                    </button>
-                  )}
-                </>
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  <button disabled={saving} onClick={() => approve(entry, true)} className="rounded-2xl bg-blue-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">Aprobar corrigiendo</button>
+                  <button disabled={saving} onClick={() => approve(entry, false)} className="rounded-2xl bg-emerald-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">Aprobar</button>
+                  <button disabled={saving} onClick={() => reject(entry)} className="rounded-2xl bg-red-50 px-3 py-3 text-xs font-black text-red-700 disabled:opacity-50">Rechazar</button>
+                </div>
               )}
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
-
-      {editEntry && editForm && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-bold text-slate-900">Editar solicitud</h3>
-              <button onClick={closeEdit} className="text-slate-400 text-xl">×</button>
-            </div>
-
-            <div>
-              <label className="input-label">Estado</label>
-              <select
-                value={editForm.validation_status}
-                onChange={e => updateEditField('validation_status', e.target.value)}
-                className="input-field"
-              >
-                <option value="pending">Pendiente</option>
-                <option value="approved">Aprobada</option>
-                <option value="rejected">Rechazada</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="input-label">Producto</label>
-              <input
-                value={editForm.product_name}
-                onChange={e => updateEditField('product_name', e.target.value)}
-                className="input-field"
-              />
-            </div>
-
-            <div>
-              <label className="input-label">Marca</label>
-              <input
-                value={editForm.brand}
-                onChange={e => updateEditField('brand', e.target.value)}
-                className="input-field"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="input-label">Cantidad</label>
-                <input
-                  type="number"
-                  min="0.001"
-                  step="any"
-                  value={editForm.quantity}
-                  onChange={e => updateEditField('quantity', e.target.value)}
-                  className="input-field"
-                />
-              </div>
-              <div>
-                <label className="input-label">Unidad</label>
-                <select
-                  value={editForm.unit}
-                  onChange={e => updateEditField('unit', e.target.value)}
-                  className="input-field"
-                >
-                  {UNIDADES.map(u => (
-                    <option key={u.value} value={u.value}>{u.label.split(' →')[0]}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="input-label">Precio total</label>
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={editForm.price}
-                onChange={e => updateEditField('price', e.target.value)}
-                className="input-field"
-              />
-            </div>
-
-            <div>
-              <label className="input-label">Tienda</label>
-              <input
-                value={editForm.store_name}
-                onChange={e => updateEditField('store_name', e.target.value)}
-                className="input-field"
-              />
-            </div>
-
-            <div>
-              <label className="input-label">Sector</label>
-              <select
-                value={editForm.sector}
-                onChange={e => updateEditField('sector', e.target.value)}
-                className="input-field"
-              >
-                <option value="" disabled>Seleccionar sector…</option>
-                {SECTORES_RANCAGUA.map(s => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="input-label">Fecha de compra</label>
-              <input
-                type="date"
-                value={editForm.purchase_date}
-                onChange={e => updateEditField('purchase_date', e.target.value)}
-                className="input-field"
-              />
-            </div>
-
-            <div>
-              <label className="input-label">Notas</label>
-              <textarea
-                rows={2}
-                value={editForm.notes}
-                onChange={e => updateEditField('notes', e.target.value)}
-                className="input-field resize-none"
-              />
-            </div>
-
-            {editForm.validation_status === 'rejected' && (
-              <div>
-                <label className="input-label">Motivo de rechazo</label>
-                <textarea
-                  rows={2}
-                  value={editForm.rejection_reason}
-                  onChange={e => updateEditField('rejection_reason', e.target.value)}
-                  className="input-field resize-none"
-                />
-              </div>
-            )}
-
-            <div className="flex gap-2 pt-2">
-              <button
-                onClick={closeEdit}
-                className="flex-1 bg-slate-100 text-slate-600 font-semibold py-3 rounded-xl"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={saveEdit}
-                disabled={processing === editEntry.id}
-                className="flex-1 btn-primary"
-              >
-                {processing === editEntry.id ? 'Guardando…' : 'Guardar cambios'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
