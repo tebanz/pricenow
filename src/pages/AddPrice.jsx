@@ -78,17 +78,79 @@ function normalizeOsmPlace(element, origin) {
   }
 }
 
-function buildOverpassNearbyQuery(lat, lng) {
-  const radiusMeters = 900
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://z.overpass-api.de/api/interpreter',
+]
+
+function buildOverpassNearbyQuery(lat, lng, radiusMeters = 3000) {
   return `
-    [out:json][timeout:12];
+    [out:json][timeout:25];
     (
-      node["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall"](around:${radiusMeters},${lat},${lng});
-      way["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall"](around:${radiusMeters},${lat},${lng});
-      relation["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall"](around:${radiusMeters},${lat},${lng});
+      node["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall|department_store|general|kiosk|variety_store|farm|seafood|beverages|frozen_food"](around:${radiusMeters},${lat},${lng});
+      way["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall|department_store|general|kiosk|variety_store|farm|seafood|beverages|frozen_food"](around:${radiusMeters},${lat},${lng});
+      relation["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall|department_store|general|kiosk|variety_store|farm|seafood|beverages|frozen_food"](around:${radiusMeters},${lat},${lng});
+      node["amenity"~"marketplace"](around:${radiusMeters},${lat},${lng});
+      way["amenity"~"marketplace"](around:${radiusMeters},${lat},${lng});
+      relation["amenity"~"marketplace"](around:${radiusMeters},${lat},${lng});
     );
-    out center tags 25;
+    out center tags 50;
   `
+}
+
+async function fetchOverpass(endpoint, query) {
+  // En producción algunos navegadores bloquean POST con headers personalizados por CORS.
+  // Por eso primero usamos GET sin headers; si falla, probamos POST simple.
+  const getUrl = `${endpoint}?data=${encodeURIComponent(query)}`
+
+  try {
+    const getResponse = await fetch(getUrl, { method: 'GET' })
+    if (!getResponse.ok) {
+      throw new Error(`GET Overpass respondió con estado ${getResponse.status}`)
+    }
+    return getResponse.json()
+  } catch (getError) {
+    const postResponse = await fetch(endpoint, {
+      method: 'POST',
+      body: new URLSearchParams({ data: query }),
+    })
+
+    if (!postResponse.ok) {
+      throw new Error(`POST Overpass respondió con estado ${postResponse.status}; GET falló: ${getError.message}`)
+    }
+
+    return postResponse.json()
+  }
+}
+
+async function fetchNearbyPlacesWithApiProxy(location) {
+  const params = new URLSearchParams({
+    lat: String(location.lat),
+    lng: String(location.lng),
+  })
+
+  const response = await fetch(`/api/nearby-osm?${params.toString()}`, {
+    method: 'GET',
+    cache: 'no-store',
+  })
+
+  const contentType = response.headers.get('content-type') || ''
+  if (!response.ok || !contentType.includes('application/json')) {
+    throw new Error(`Proxy OSM no disponible: ${response.status}`)
+  }
+
+  const data = await response.json()
+  if (!Array.isArray(data.places)) return []
+
+  return data.places
+    .map(place => ({
+      ...place,
+      distance_km: place.distance_km ?? distanceKm(location, { lat: place.lat, lng: place.lng }),
+    }))
+    .filter(place => place.name && place.distance_km != null)
+    .sort((a, b) => a.distance_km - b.distance_km)
+    .slice(0, 12)
 }
 
 export default function AddPrice() {
@@ -227,33 +289,65 @@ export default function AddPrice() {
     setOsmLoading(true)
     setOsmSearched(true)
 
-    try {
-      const query = buildOverpassNearbyQuery(location.lat, location.lng)
-      const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`
-      const response = await fetch(url)
+    const radii = [3000, 7000, 15000]
+    let lastError = null
+    let hadSuccessfulResponse = false
 
-      if (!response.ok) {
-        throw new Error(`Overpass respondió con estado ${response.status}`)
+    try {
+      // En Vercel usamos primero una función /api propia para evitar diferencias de CORS
+      // entre localhost y producción.
+      try {
+        const proxyResults = await fetchNearbyPlacesWithApiProxy(location)
+        hadSuccessfulResponse = true
+        if (proxyResults.length > 0) {
+          setOsmPlaces(proxyResults)
+          return
+        }
+      } catch (proxyError) {
+        lastError = proxyError
       }
 
-      const data = await response.json()
-      const unique = new Map()
+      // Fallback para localhost/Vite o si la función /api no está disponible.
+      for (const radius of radii) {
+        const query = buildOverpassNearbyQuery(location.lat, location.lng, radius)
 
-      ;(data.elements || [])
-        .map(element => normalizeOsmPlace(element, location))
-        .filter(Boolean)
-        .filter(place => place.distance_km != null)
-        .sort((a, b) => a.distance_km - b.distance_km)
-        .forEach(place => {
-          const key = `${place.name.toLowerCase()}-${place.lat}-${place.lng}`
-          if (!unique.has(key)) unique.set(key, place)
-        })
+        for (const endpoint of OVERPASS_ENDPOINTS) {
+          try {
+            const data = await fetchOverpass(endpoint, query)
+            hadSuccessfulResponse = true
+            const unique = new Map()
 
-      setOsmPlaces(Array.from(unique.values()).slice(0, 8))
+            ;(data.elements || [])
+              .map(element => normalizeOsmPlace(element, location))
+              .filter(Boolean)
+              .filter(place => place.distance_km != null)
+              .sort((a, b) => a.distance_km - b.distance_km)
+              .forEach(place => {
+                const key = `${place.name.toLowerCase()}-${place.lat}-${place.lng}`
+                if (!unique.has(key)) unique.set(key, place)
+              })
+
+            const results = Array.from(unique.values()).slice(0, 12)
+            if (results.length > 0) {
+              setOsmPlaces(results)
+              return
+            }
+          } catch (err) {
+            lastError = err
+          }
+        }
+      }
+
+      setOsmPlaces([])
+      if (!hadSuccessfulResponse) {
+        setError('No se pudo consultar OpenStreetMap. Puedes elegir una tienda conocida o escribirla manualmente.')
+      }
     } catch (err) {
-      setError('No se pudieron detectar negocios cercanos con OpenStreetMap. Puedes ingresar la tienda manualmente.')
+      lastError = err
+      setError('No se pudieron detectar negocios cercanos. Puedes ingresar la tienda manualmente.')
       setOsmPlaces([])
     } finally {
+      if (lastError) console.warn('OpenStreetMap/Overpass error:', lastError)
       setOsmLoading(false)
     }
   }
@@ -502,7 +596,7 @@ export default function AddPrice() {
                   disabled={osmLoading}
                   className="btn-primary w-full text-sm py-2"
                 >
-                  {osmLoading ? 'Buscando negocios cercanos…' : 'Detectar negocios cercanos gratis'}
+                  {osmLoading ? 'Buscando negocios cercanos…' : 'Detectar negocios cercanos'}
                 </button>
 
                 <p className="text-[11px] text-slate-400">
@@ -533,7 +627,7 @@ export default function AddPrice() {
 
                 {osmSearched && !osmLoading && osmPlaces.length === 0 && (
                   <p className="text-xs text-slate-500">
-                    No se encontraron negocios cercanos en OpenStreetMap. Puedes escribir la tienda manualmente.
+                    No se encontraron negocios cercanos para esta ubicación. Elige una tienda conocida de la lista superior o escríbela manualmente.
                   </p>
                 )}
               </div>
