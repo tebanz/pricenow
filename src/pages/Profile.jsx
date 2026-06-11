@@ -140,6 +140,45 @@ function formatLocation(location) {
   return `${Number(location.lat).toFixed(6)}, ${Number(location.lng).toFixed(6)}`
 }
 
+const USERNAME_CHANGE_DAYS = 90
+
+function usernameChangeInfo(profile) {
+  const lastChanged = profile?.username_last_changed_at ? new Date(profile.username_last_changed_at) : null
+  if (!lastChanged || Number.isNaN(lastChanged.getTime())) {
+    return { locked: false, daysLeft: 0, nextDate: null, label: 'Puedes cambiar tu usuario una vez. Después quedará bloqueado por 90 días.' }
+  }
+
+  const nextDate = new Date(lastChanged)
+  nextDate.setDate(nextDate.getDate() + USERNAME_CHANGE_DAYS)
+  const now = new Date()
+  const diffMs = nextDate.getTime() - now.getTime()
+  const daysLeft = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)))
+
+  if (daysLeft <= 0) {
+    return { locked: false, daysLeft: 0, nextDate, label: 'Ya puedes cambiar tu nombre de usuario nuevamente.' }
+  }
+
+  return {
+    locked: true,
+    daysLeft,
+    nextDate,
+    label: `Podrás cambiar tu usuario nuevamente en ${daysLeft} día${daysLeft === 1 ? '' : 's'}.`,
+  }
+}
+
+function cleanUsername(value) {
+  return value
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9_\.]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 30)
+}
+
 
 function initialsFromProfile(profile, user) {
   const base = profile?.full_name || profile?.username || user?.email || 'PN'
@@ -305,6 +344,10 @@ export default function Profile() {
   const points = wallet?.current_points || 0
   const lifetimePoints = wallet?.lifetime_points || 0
   const level = levelFromPoints(lifetimePoints)
+  const usernameInfo = usernameChangeInfo(profile)
+  const currentUsername = profile?.username || ''
+  const proposedUsername = cleanUsername(profileForm.username || '')
+  const usernameChanged = proposedUsername && proposedUsername !== currentUsername
   const nextLevelProgress = level.next
     ? Math.round(((lifetimePoints - level.min) / (level.next - level.min)) * 100)
     : 100
@@ -384,19 +427,41 @@ export default function Profile() {
     setProfileSaving(true)
     setProfileMessage(null)
 
+    const cleanName = cleanUsername(profileForm.username || '')
+    const changedUsername = cleanName && cleanName !== (profile?.username || '')
+
+    if (!cleanName) {
+      setProfileMessage({ type: 'error', text: 'El nombre de usuario no puede quedar vacío.' })
+      setProfileSaving(false)
+      return
+    }
+
+    if (changedUsername && usernameInfo.locked) {
+      setProfileMessage({ type: 'error', text: `Por seguridad, el usuario solo se puede cambiar una vez cada ${USERNAME_CHANGE_DAYS} días. ${usernameInfo.label}` })
+      setProfileSaving(false)
+      return
+    }
+
+    const payload = {
+      full_name: profileForm.full_name.trim(),
+      updated_at: new Date().toISOString(),
+    }
+
+    if (changedUsername) {
+      payload.username = cleanName
+      payload.username_last_changed_at = new Date().toISOString()
+    }
+
     const { error: updateError } = await supabase
       .from('profiles')
-      .update({
-        username: profileForm.username.trim(),
-        full_name: profileForm.full_name.trim(),
-        updated_at: new Date().toISOString(),
-      })
+      .update(payload)
       .eq('id', user.id)
 
     if (updateError) {
       setProfileMessage({ type: 'error', text: updateError.message })
     } else {
-      setProfileMessage({ type: 'success', text: 'Perfil actualizado. Si no ves el cambio de inmediato, recarga la app.' })
+      setProfileForm(prev => ({ ...prev, username: cleanName }))
+      setProfileMessage({ type: 'success', text: changedUsername ? 'Perfil actualizado. El nombre de usuario quedó bloqueado por 90 días.' : 'Perfil actualizado.' })
     }
 
     setProfileSaving(false)
@@ -442,7 +507,7 @@ export default function Profile() {
       <div>
         <h2 className="text-xl font-bold text-slate-900">Mi perfil</h2>
         <p className="text-sm text-slate-500 mt-0.5">
-          Revisa tus puntos, beneficios y preferencias sin duplicar accesos en la pantalla.
+          Gestiona tu identidad, puntos, beneficios y preferencias de PriceNow.
         </p>
       </div>
 
@@ -761,13 +826,22 @@ export default function Profile() {
                 />
               </div>
               <div>
-                <label className="input-label">Usuario</label>
+                <div className="mb-1 flex items-center justify-between gap-3">
+                  <label className="text-sm font-medium text-slate-700">Usuario</label>
+                  <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${usernameInfo.locked ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                    {usernameInfo.locked ? `${usernameInfo.daysLeft} días` : 'Disponible'}
+                  </span>
+                </div>
                 <input
                   className="input-field"
                   value={profileForm.username}
                   onChange={e => setProfileForm(prev => ({ ...prev, username: e.target.value }))}
                   placeholder="usuario"
+                  disabled={usernameInfo.locked && !usernameChanged}
                 />
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                  {usernameInfo.label} Puedes editar tu nombre público cuando quieras.
+                </p>
               </div>
               {profileMessage && (
                 <p className={`text-sm ${profileMessage.type === 'error' ? 'text-danger-600' : 'text-success-600'}`}>

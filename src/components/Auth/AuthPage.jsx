@@ -131,7 +131,7 @@ export default function AuthPage() {
                 Encuentra mejores precios cerca de ti.
               </h1>
               <p className="mt-5 max-w-lg text-base leading-relaxed text-white/70 sm:text-lg">
-                Compara precios reales, reporta compras verificables, gana puntos y accede a beneficios locales en Rancagua.
+                Compara precios reales, reporta compras verificables, gana puntos y descubre beneficios locales en Rancagua.
               </p>
             </div>
           </div>
@@ -234,7 +234,7 @@ export default function AuthPage() {
               </div>
 
               <button disabled={loading} className="btn-primary w-full rounded-2xl py-4 text-base shadow-lg shadow-brand-500/20">
-                {loading ? 'Procesando...' : mode === 'login' ? 'Entrar a PriceNow' : 'Crear cuenta gratis'}
+                {loading ? 'Procesando...' : mode === 'login' ? 'Entrar a PriceNow' : 'Crear cuenta'}
               </button>
             </div>
 
