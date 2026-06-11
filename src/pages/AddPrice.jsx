@@ -320,6 +320,8 @@ export default function AddPrice() {
   const [osmPlaces, setOsmPlaces] = useState([])
   const [osmLoading, setOsmLoading] = useState(false)
   const [osmSearched, setOsmSearched] = useState(false)
+  const [productCatalogOpen, setProductCatalogOpen] = useState(false)
+  const [productCatalogCategory, setProductCatalogCategory] = useState('Todas')
 
   const unitPrice = calcUnitPrice(form.price, form.quantity, form.unit)
 
@@ -369,6 +371,21 @@ export default function AddPrice() {
         .slice(0, 8)
     : []
 
+  const catalogCategories = [
+    'Todas',
+    ...Array.from(new Set(products.map(product => product.category || 'Otros'))).sort((a, b) => a.localeCompare(b)),
+  ]
+
+  const catalogProducts = products
+    .filter(product => productCatalogCategory === 'Todas' || (product.category || 'Otros') === productCatalogCategory)
+    .filter(product => {
+      if (productQuery.length < 2) return true
+      const searchText = normalizeText(`${product.name} ${product.category || ''} ${product.subcategory || ''} ${product.canonical_name || ''}`)
+      return searchText.includes(productQuery)
+    })
+    .sort((a, b) => `${a.category || ''} ${a.name}`.localeCompare(`${b.category || ''} ${b.name}`))
+    .slice(0, 80)
+
   function handleChange(e) {
     const { name, value } = e.target
     setForm(prev => {
@@ -389,6 +406,7 @@ export default function AddPrice() {
       unit: product.default_unit || prev.unit,
       _product_id: product.id,
     }))
+    setProductCatalogOpen(false)
     setError(null)
   }
 
@@ -679,6 +697,59 @@ export default function AddPrice() {
                   <p className="text-xs text-slate-400">{product.category}{product.subcategory ? ` · ${product.subcategory}` : ''} · unidad base: {product.default_unit}</p>
                 </button>
               ))}
+            </div>
+          )}
+
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={() => setProductCatalogOpen(prev => !prev)}
+              className="btn-secondary w-full text-sm py-2"
+            >
+              {productCatalogOpen ? 'Ocultar catálogo de productos' : 'Ver catálogo de productos'}
+            </button>
+          </div>
+
+          {productCatalogOpen && (
+            <div className="mt-2 bg-white border border-slate-200 rounded-xl p-3">
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <div>
+                  <p className="text-xs font-semibold text-slate-700">Catálogo PriceNow</p>
+                  <p className="text-[11px] text-slate-400">Selecciona un producto estándar o escribe uno nuevo.</p>
+                </div>
+                <span className="text-[11px] text-slate-400 whitespace-nowrap">{products.length} productos</span>
+              </div>
+
+              <label className="input-label">Filtrar por categoría</label>
+              <select
+                value={productCatalogCategory}
+                onChange={e => setProductCatalogCategory(e.target.value)}
+                className="input-field mb-2"
+              >
+                {catalogCategories.map(category => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
+              </select>
+
+              {catalogProducts.length > 0 ? (
+                <div className="max-h-64 overflow-y-auto rounded-lg border border-slate-100 divide-y divide-slate-100">
+                  {catalogProducts.map(product => (
+                    <button
+                      key={product.id}
+                      type="button"
+                      onClick={() => applyProduct(product)}
+                      className="w-full text-left px-3 py-2 active:bg-brand-50"
+                    >
+                      <p className="text-sm font-semibold text-slate-800">{product.name}</p>
+                      <p className="text-xs text-slate-400">{product.category}{product.subcategory ? ` · ${product.subcategory}` : ''} · unidad base: {product.default_unit}</p>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 bg-slate-50 rounded-lg p-3">
+                  No hay productos con ese filtro. Puedes escribir el nombre manualmente y PriceNow lo creará como producto estandarizado.
+                </p>
+              )}
             </div>
           )}
 

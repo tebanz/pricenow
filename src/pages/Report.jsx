@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { formatCLP, formatUnitPrice, priceChangeDisplay } from '../utils/priceCalc'
+import { formatUnitPrice, priceChangeDisplay } from '../utils/priceCalc'
 import Spinner from '../components/UI/Spinner'
 import { format, startOfWeek, endOfWeek, subWeeks, subDays } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -26,15 +26,33 @@ function comparableUnit(unit) {
   return unit || 'unidad'
 }
 
+const MASS_UNITS = new Set(['kg'])
+const VOLUME_UNITS = new Set(['litro'])
+
+function isCompatibleUnit(rowUnit, standardUnit) {
+  const comparable = comparableUnit(rowUnit)
+  if (MASS_UNITS.has(standardUnit)) return comparable === standardUnit
+  if (VOLUME_UNITS.has(standardUnit)) return comparable === standardUnit
+  return comparable === standardUnit
+}
+
+function normalizedUnitPrice(row, standardUnit) {
+  if (!isCompatibleUnit(row.unit, standardUnit)) return null
+  const value = Number(row.unit_price)
+  if (!Number.isFinite(value) || value <= 0) return null
+  return value
+}
+
 function groupByProduct(rows) {
   return rows.reduce((acc, row) => {
     const linkedProduct = Array.isArray(row.products) ? row.products[0] : row.products
     const productName = linkedProduct?.name || row.product_name?.trim() || 'Producto sin nombre'
     const category = linkedProduct?.category || 'Sin categoría'
-    const unit = comparableUnit(row.unit)
+    const unit = comparableUnit(linkedProduct?.default_unit || row.unit)
     const key = row.product_id
       ? `${row.product_id}__${unit}`
       : `${normalizeText(productName)}__${unit}`
+    const unitPrice = normalizedUnitPrice(row, unit)
 
     if (!acc[key]) {
       acc[key] = {
@@ -42,15 +60,21 @@ function groupByProduct(rows) {
         product_name: productName,
         category,
         unit,
-        prices: [],
         unitPrices: [],
+        rawCount: 0,
+        incompatibleCount: 0,
         stores: new Set(),
         latestDate: null,
       }
     }
 
-    acc[key].prices.push(Number(row.price))
-    acc[key].unitPrices.push(Number(row.unit_price ?? row.price))
+    acc[key].rawCount += 1
+    if (unitPrice != null) {
+      acc[key].unitPrices.push(unitPrice)
+    } else {
+      acc[key].incompatibleCount += 1
+    }
+
     if (row.store_name) acc[key].stores.add(row.store_name)
     if (!acc[key].latestDate || row.purchase_date > acc[key].latestDate) {
       acc[key].latestDate = row.purchase_date
@@ -66,9 +90,10 @@ function buildReport(currentRows, previousRows) {
 
   return Object.entries(current)
     .map(([key, group]) => {
-      const avgPrice = average(group.prices)
+      if (!group.unitPrices.length) return null
+
       const avgUnitPrice = average(group.unitPrices)
-      const previousAvgUnitPrice = previous[key]
+      const previousAvgUnitPrice = previous[key]?.unitPrices?.length
         ? average(previous[key].unitPrices)
         : null
 
@@ -81,18 +106,18 @@ function buildReport(currentRows, previousRows) {
         product_name: group.product_name,
         category: group.category,
         unit: group.unit,
-        avg_price: avgPrice,
-        min_price: Math.min(...group.prices),
-        max_price: Math.max(...group.prices),
         avg_unit_price: avgUnitPrice,
         min_unit_price: Math.min(...group.unitPrices),
         max_unit_price: Math.max(...group.unitPrices),
         price_change_pct: priceChangePct,
-        sample_count: group.prices.length,
+        sample_count: group.unitPrices.length,
+        raw_count: group.rawCount,
+        incompatible_count: group.incompatibleCount,
         store_count: group.stores.size,
         latest_date: group.latestDate,
       }
     })
+    .filter(Boolean)
     .sort((a, b) => {
       if (b.sample_count !== a.sample_count) return b.sample_count - a.sample_count
       return a.product_name.localeCompare(b.product_name, 'es')
@@ -152,7 +177,7 @@ export default function Report() {
   async function fetchApprovedRows(start, end) {
     let query = supabase
       .from('price_entries')
-      .select('product_id, product_name, price, unit_price, unit, store_name, purchase_date, products(name, canonical_name, category)')
+      .select('product_id, product_name, price, quantity, unit_price, unit, store_name, purchase_date, products(name, canonical_name, category, default_unit)')
       .eq('validation_status', 'approved')
       .order('purchase_date', { ascending: false })
       .limit(2000)
@@ -308,7 +333,7 @@ export default function Report() {
       {!loading && filteredRows.length > 0 && (
         <>
           <p className="text-xs text-slate-400 mb-3">
-            Mostrando {filteredRows.length} {filteredRows.length === 1 ? 'producto' : 'productos'} · {reportRows.reduce((acc, row) => acc + row.sample_count, 0)} registros aprobados
+            Mostrando {filteredRows.length} {filteredRows.length === 1 ? 'producto' : 'productos'} · {reportRows.reduce((acc, row) => acc + row.sample_count, 0)} registros comparables
           </p>
 
           <div className="space-y-3">
@@ -321,7 +346,8 @@ export default function Report() {
                       <p className="font-semibold text-slate-800 truncate">{row.product_name}</p>
                       <p className="text-[11px] text-brand-600 font-medium mt-0.5">{row.category}</p>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        {row.sample_count} {row.sample_count === 1 ? 'registro' : 'registros'} · {row.store_count} {row.store_count === 1 ? 'tienda' : 'tiendas'}
+                        {row.sample_count} {row.sample_count === 1 ? 'registro comparable' : 'registros comparables'} · {row.store_count} {row.store_count === 1 ? 'tienda' : 'tiendas'}
+                        {row.incompatible_count > 0 && <> · {row.incompatible_count} sin unidad comparable</>}
                         {row.latest_date && <> · último: {row.latest_date}</>}
                       </p>
                     </div>
@@ -334,23 +360,23 @@ export default function Report() {
 
                   <div className="grid grid-cols-3 gap-2 mt-3">
                     <div className="text-center bg-slate-50 rounded-lg p-2">
-                      <p className="text-xs text-slate-400 mb-0.5">Mínimo</p>
-                      <p className="text-sm font-bold text-success-600">{formatCLP(row.min_price)}</p>
+                      <p className="text-xs text-slate-400 mb-0.5">Mínimo estándar</p>
+                      <p className="text-sm font-bold text-success-600">{formatUnitPrice(row.min_unit_price, row.unit)}</p>
                     </div>
                     <div className="text-center bg-slate-50 rounded-lg p-2">
-                      <p className="text-xs text-slate-400 mb-0.5">Promedio</p>
-                      <p className="text-sm font-bold text-brand-500">{formatCLP(row.avg_price)}</p>
+                      <p className="text-xs text-slate-400 mb-0.5">Promedio estándar</p>
+                      <p className="text-sm font-bold text-brand-500">{formatUnitPrice(row.avg_unit_price, row.unit)}</p>
                     </div>
                     <div className="text-center bg-slate-50 rounded-lg p-2">
-                      <p className="text-xs text-slate-400 mb-0.5">Máximo</p>
-                      <p className="text-sm font-bold text-danger-500">{formatCLP(row.max_price)}</p>
+                      <p className="text-xs text-slate-400 mb-0.5">Máximo estándar</p>
+                      <p className="text-sm font-bold text-danger-500">{formatUnitPrice(row.max_unit_price, row.unit)}</p>
                     </div>
                   </div>
 
                   <div className="mt-3 bg-brand-50 rounded-lg p-2 text-center">
-                    <p className="text-xs text-slate-500 mb-0.5">Promedio normalizado</p>
+                    <p className="text-xs text-slate-500 mb-0.5">Unidad de comparación</p>
                     <p className="text-sm font-bold text-brand-600">
-                      {formatUnitPrice(row.avg_unit_price, row.unit)}
+                      Los precios de este producto se comparan por {row.unit === 'unidad' ? 'unidad' : row.unit}.
                     </p>
                   </div>
                 </div>
