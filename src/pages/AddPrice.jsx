@@ -8,6 +8,8 @@ import {
 
 const EMPTY_FORM = {
   product_name: '',
+  product_category: 'Otros',
+  _product_id: null,
   brand: '',
   quantity: '',
   unit: 'unidad',
@@ -17,6 +19,28 @@ const EMPTY_FORM = {
   purchase_date: new Date().toISOString().slice(0, 10),
   notes: '',
 }
+
+const PRODUCT_CATEGORIES = [
+  'Panadería',
+  'Lácteos',
+  'Huevos',
+  'Carnes',
+  'Pescados y mariscos',
+  'Frutas',
+  'Verduras',
+  'Abarrotes',
+  'Arroz y legumbres',
+  'Pastas',
+  'Aceites',
+  'Conservas',
+  'Bebidas',
+  'Congelados',
+  'Limpieza',
+  'Higiene',
+  'Mascotas',
+  'Bebé',
+  'Otros',
+]
 
 function googleMapsUrl(lat, lng) {
   if (lat == null || lng == null) return null
@@ -285,6 +309,7 @@ export default function AddPrice() {
 
   const [form, setForm] = useState(EMPTY_FORM)
   const [stores, setStores] = useState([])
+  const [products, setProducts] = useState([])
   const [photo, setPhoto] = useState(null)
   const [preview, setPreview] = useState(null)
   const [error, setError] = useState(null)
@@ -305,6 +330,14 @@ export default function AddPrice() {
       .eq('is_active', true)
       .order('name')
       .then(({ data }) => { if (data) setStores(data) })
+
+    supabase
+      .from('products')
+      .select('id, name, canonical_name, category, subcategory, default_unit')
+      .eq('is_active', true)
+      .order('category')
+      .order('name')
+      .then(({ data }) => { if (data) setProducts(data) })
   }, [])
 
   const nearbyStores = location
@@ -323,10 +356,63 @@ export default function AddPrice() {
         .slice(0, 5)
     : []
 
+  const productQuery = normalizeText(form.product_name)
+  const selectedProduct = form._product_id
+    ? products.find(product => product.id === form._product_id)
+    : null
+  const productSuggestions = productQuery.length >= 2
+    ? products
+        .filter(product => {
+          const searchText = normalizeText(`${product.name} ${product.category || ''} ${product.subcategory || ''} ${product.canonical_name || ''}`)
+          return searchText.includes(productQuery)
+        })
+        .slice(0, 8)
+    : []
+
   function handleChange(e) {
     const { name, value } = e.target
-    setForm(prev => ({ ...prev, [name]: value }))
+    setForm(prev => {
+      const next = { ...prev, [name]: value }
+      if (name === 'product_name') {
+        next._product_id = null
+      }
+      return next
+    })
     setError(null)
+  }
+
+  function applyProduct(product) {
+    setForm(prev => ({
+      ...prev,
+      product_name: product.name,
+      product_category: product.category || prev.product_category || 'Otros',
+      unit: product.default_unit || prev.unit,
+      _product_id: product.id,
+    }))
+    setError(null)
+  }
+
+  async function resolveProductBeforeSubmit() {
+    if (form._product_id) {
+      return { id: form._product_id, name: form.product_name.trim() }
+    }
+
+    const { data, error: productErr } = await supabase.rpc('find_or_create_product', {
+      p_name: form.product_name.trim(),
+      p_category: form.product_category || 'Otros',
+      p_default_unit: form.unit,
+    })
+
+    if (productErr) throw productErr
+
+    const product = Array.isArray(data) ? data[0] : data
+    if (!product?.id) return null
+
+    return {
+      id: product.id,
+      name: product.name || form.product_name.trim(),
+      category: product.category || form.product_category || 'Otros',
+    }
   }
 
   function applyStore(store) {
@@ -493,9 +579,19 @@ export default function AddPrice() {
       receipt_photo_url = path
     }
 
+    let resolvedProduct = null
+    try {
+      resolvedProduct = await resolveProductBeforeSubmit()
+    } catch (productErr) {
+      setError('Error al estandarizar el producto: ' + productErr.message)
+      setLoading(false)
+      return
+    }
+
     const { error: insertErr } = await supabase.from('price_entries').insert({
       user_id: user.id,
-      product_name: form.product_name.trim(),
+      product_id: resolvedProduct?.id ?? null,
+      product_name: resolvedProduct?.name || form.product_name.trim(),
       brand: form.brand.trim() || null,
       quantity: parseFloat(form.quantity),
       unit: form.unit,
@@ -562,6 +658,48 @@ export default function AddPrice() {
             maxLength={100}
             className="input-field"
           />
+
+          {selectedProduct && (
+            <p className="text-xs text-success-600 font-medium mt-1.5">
+              Producto estandarizado: {selectedProduct.name} · {selectedProduct.category}
+            </p>
+          )}
+
+          {!selectedProduct && productSuggestions.length > 0 && (
+            <div className="mt-2 bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <p className="text-[11px] text-slate-400 px-3 pt-2">Selecciona si corresponde:</p>
+              {productSuggestions.map(product => (
+                <button
+                  key={product.id}
+                  type="button"
+                  onClick={() => applyProduct(product)}
+                  className="w-full text-left px-3 py-2 border-t border-slate-100 active:bg-brand-50"
+                >
+                  <p className="text-sm font-semibold text-slate-800">{product.name}</p>
+                  <p className="text-xs text-slate-400">{product.category}{product.subcategory ? ` · ${product.subcategory}` : ''} · unidad base: {product.default_unit}</p>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {!selectedProduct && form.product_name.trim().length >= 2 && (
+            <div className="mt-2">
+              <label className="input-label">Categoría si es producto nuevo</label>
+              <select
+                name="product_category"
+                value={form.product_category}
+                onChange={handleChange}
+                className="input-field"
+              >
+                {PRODUCT_CATEGORIES.map(category => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Si el producto no existe, PriceNow lo creará como producto estandarizado para que los reportes puedan promediarlo.
+              </p>
+            </div>
+          )}
         </div>
 
         <div>

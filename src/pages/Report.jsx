@@ -10,15 +10,37 @@ function average(values) {
   return values.reduce((acc, value) => acc + Number(value || 0), 0) / values.length
 }
 
+function normalizeText(value = '') {
+  return value
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function comparableUnit(unit) {
+  if (unit === 'g') return 'kg'
+  if (unit === 'ml') return 'litro'
+  return unit || 'unidad'
+}
+
 function groupByProduct(rows) {
   return rows.reduce((acc, row) => {
-    const productName = row.product_name?.trim() || 'Producto sin nombre'
-    const unit = row.unit || 'unidad'
-    const key = `${productName.toLowerCase()}__${unit}`
+    const linkedProduct = Array.isArray(row.products) ? row.products[0] : row.products
+    const productName = linkedProduct?.name || row.product_name?.trim() || 'Producto sin nombre'
+    const category = linkedProduct?.category || 'Sin categoría'
+    const unit = comparableUnit(row.unit)
+    const key = row.product_id
+      ? `${row.product_id}__${unit}`
+      : `${normalizeText(productName)}__${unit}`
 
     if (!acc[key]) {
       acc[key] = {
+        product_id: row.product_id || null,
         product_name: productName,
+        category,
         unit,
         prices: [],
         unitPrices: [],
@@ -55,7 +77,9 @@ function buildReport(currentRows, previousRows) {
         : null
 
       return {
+        product_id: group.product_id,
         product_name: group.product_name,
+        category: group.category,
         unit: group.unit,
         avg_price: avgPrice,
         min_price: Math.min(...group.prices),
@@ -128,7 +152,7 @@ export default function Report() {
   async function fetchApprovedRows(start, end) {
     let query = supabase
       .from('price_entries')
-      .select('product_name, price, unit_price, unit, store_name, purchase_date')
+      .select('product_id, product_name, price, unit_price, unit, store_name, purchase_date, products(name, canonical_name, category)')
       .eq('validation_status', 'approved')
       .order('purchase_date', { ascending: false })
       .limit(2000)
@@ -176,9 +200,11 @@ export default function Report() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [periodMode, weekOffset])
 
-  const filteredRows = reportRows.filter(row =>
-    row.product_name.toLowerCase().includes(search.trim().toLowerCase())
-  )
+  const filteredRows = reportRows.filter(row => {
+    const term = search.trim().toLowerCase()
+    if (!term) return true
+    return `${row.product_name} ${row.category || ''}`.toLowerCase().includes(term)
+  })
 
   return (
     <div className="px-4 py-5 max-w-lg mx-auto">
@@ -293,6 +319,7 @@ export default function Report() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <p className="font-semibold text-slate-800 truncate">{row.product_name}</p>
+                      <p className="text-[11px] text-brand-600 font-medium mt-0.5">{row.category}</p>
                       <p className="text-xs text-slate-400 mt-0.5">
                         {row.sample_count} {row.sample_count === 1 ? 'registro' : 'registros'} · {row.store_count} {row.store_count === 1 ? 'tienda' : 'tiendas'}
                         {row.latest_date && <> · último: {row.latest_date}</>}
