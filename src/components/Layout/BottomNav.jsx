@@ -71,7 +71,7 @@ export default function BottomNav() {
         <NavLink
           to="/add"
           className={({ isActive }) =>
-            `pointer-events-auto absolute z-30 left-1/2 -translate-x-1/2 -top-7 w-16 h-16 rounded-full shadow-xl border-4 border-slate-50 flex items-center justify-center active:scale-95 transition-transform ${
+            `pointer-events-auto absolute z-40 left-1/2 -translate-x-1/2 -top-8 w-17 h-17 rounded-full shadow-2xl border-4 border-slate-50 flex items-center justify-center active:scale-95 transition-transform ${
               isActive ? 'bg-brand-700' : 'bg-brand-500'
             }`
           }
@@ -80,7 +80,7 @@ export default function BottomNav() {
           <PlusIcon />
         </NavLink>
 
-        <div className="pointer-events-auto relative z-10 bg-white/95 backdrop-blur border border-slate-200 shadow-[0_-8px_24px_rgba(15,23,42,0.08)] rounded-t-3xl px-3 pt-2 pb-[calc(env(safe-area-inset-bottom,0px)+8px)] grid grid-cols-5 items-end overflow-visible">
+        <div className={`pointer-events-auto relative z-10 bg-white/95 backdrop-blur border border-slate-200 shadow-[0_-8px_24px_rgba(15,23,42,0.08)] rounded-t-3xl px-3 pt-2 pb-[calc(env(safe-area-inset-bottom,0px)+8px)] grid items-end overflow-visible ${isValidator ? 'grid-cols-5' : 'grid-cols-4'}`}>
           <NavItem to="/" label="Inicio" icon={HomeIcon} end />
           <NavItem to="/ranking" label="Precios" icon={PricesIcon} />
 
@@ -90,10 +90,8 @@ export default function BottomNav() {
 
           <NavItem to="/profile" label="Perfil" icon={ProfileIcon} />
 
-          {isValidator ? (
+          {isValidator && (
             <NavItem to="/validate" label="Validar" icon={ValidateIcon} warning />
-          ) : (
-            <div className="h-16" aria-hidden="true" />
           )}
         </div>
       </div>

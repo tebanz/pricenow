@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import Report from './Report'
 import { supabase } from '../lib/supabase'
 import { formatCLP, formatUnitPrice, SECTORES_RANCAGUA } from '../utils/priceCalc'
 import Spinner from '../components/UI/Spinner'
@@ -140,6 +142,8 @@ function buildRanking(rows, searchTerm) {
 }
 
 export default function Ranking() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = searchParams.get('tab') === 'reportes' ? 'reportes' : 'ranking'
   const [query, setQuery] = useState('')
   const [sector, setSector] = useState('')
   const [period, setPeriod] = useState('30d')
@@ -216,12 +220,63 @@ export default function Ranking() {
     setSearched(true)
   }
 
+  function changeTab(tab) {
+    setSearchParams(tab === 'reportes' ? { tab: 'reportes' } : {})
+  }
+
+  if (activeTab === 'reportes') {
+    return (
+      <div className="max-w-lg mx-auto">
+        <div className="px-4 pt-5">
+          <h2 className="text-xl font-bold text-slate-900 mb-1">Precios</h2>
+          <p className="text-sm text-slate-500 mb-4">
+            Ranking y reportes en un mismo lugar, con precios comparables por unidad estándar.
+          </p>
+          <div className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1 mb-2">
+            <button
+              type="button"
+              onClick={() => changeTab('ranking')}
+              className="py-2 rounded-xl text-sm font-bold text-slate-500"
+            >
+              Ranking
+            </button>
+            <button
+              type="button"
+              onClick={() => changeTab('reportes')}
+              className="py-2 rounded-xl text-sm font-bold bg-white text-brand-600 shadow-sm"
+            >
+              Reportes
+            </button>
+          </div>
+        </div>
+        <Report />
+      </div>
+    )
+  }
+
   return (
     <div className="px-4 py-5 max-w-lg mx-auto">
-      <h2 className="text-xl font-bold text-slate-900 mb-1">Ranking de precios</h2>
+      <h2 className="text-xl font-bold text-slate-900 mb-1">Precios</h2>
       <p className="text-sm text-slate-500 mb-4">
         Compara tiendas usando precio estándar por kg, litro, unidad, caja o par según el producto.
       </p>
+
+      <div className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1 mb-5">
+        <button
+          type="button"
+          onClick={() => changeTab('ranking')}
+          className="py-2 rounded-xl text-sm font-bold bg-white text-brand-600 shadow-sm"
+        >
+          Ranking
+        </button>
+        <button
+          type="button"
+          onClick={() => changeTab('reportes')}
+          className="py-2 rounded-xl text-sm font-bold text-slate-500"
+        >
+          Reportes
+        </button>
+      </div>
 
       <form onSubmit={handleSearch} className="space-y-3 mb-5">
         <div className="flex gap-2">

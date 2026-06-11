@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import { formatCLP } from '../utils/priceCalc'
 import Spinner from '../components/UI/Spinner'
+import Benefits from './Benefits'
 
 function startOfToday() {
   const date = new Date()
@@ -43,15 +43,6 @@ function dateKey(value) {
 
 function clampPct(value) {
   return Math.max(0, Math.min(100, Math.round(value)))
-}
-
-function statusBadge(status) {
-  const map = {
-    pending: <span className="badge-pending">Pendiente</span>,
-    approved: <span className="badge-approved">Aprobado</span>,
-    rejected: <span className="badge-rejected">Rechazado</span>,
-  }
-  return map[status] || null
 }
 
 function transactionLabel(reason) {
@@ -111,14 +102,72 @@ function MissionCard({ title, description, value, max, reward }) {
   )
 }
 
+function TabButton({ id, active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(id)}
+      className={`px-3 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors ${
+        active ? 'bg-brand-500 text-white shadow-sm' : 'bg-white text-slate-500 border border-slate-100'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+const DEFAULT_PREFERENCES = {
+  favoriteSector: '',
+  homeReference: '',
+  compactMode: false,
+  nearbyFirst: true,
+  showEconomicTips: true,
+  weeklyGoal: 5,
+  savedLocation: null,
+}
+
+function loadPreferences(userId) {
+  try {
+    const raw = localStorage.getItem(`pricenow_preferences_${userId}`)
+    return raw ? { ...DEFAULT_PREFERENCES, ...JSON.parse(raw) } : DEFAULT_PREFERENCES
+  } catch {
+    return DEFAULT_PREFERENCES
+  }
+}
+
+function formatLocation(location) {
+  if (!location?.lat || !location?.lng) return 'Sin ubicación guardada'
+  return `${Number(location.lat).toFixed(6)}, ${Number(location.lng).toFixed(6)}`
+}
+
 export default function Profile() {
-  const { user, profile } = useAuth()
+  const { user, profile, isValidator } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = searchParams.get('tab') || 'resumen'
   const [entries, setEntries] = useState([])
   const [wallet, setWallet] = useState(null)
   const [transactions, setTransactions] = useState([])
   const [redemptions, setRedemptions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [profileForm, setProfileForm] = useState({ username: '', full_name: '' })
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileMessage, setProfileMessage] = useState(null)
+  const [preferences, setPreferences] = useState(() => loadPreferences(user?.id))
+  const [preferencesMessage, setPreferencesMessage] = useState(null)
+  const [locationLoading, setLocationLoading] = useState(false)
+
+  useEffect(() => {
+    setProfileForm({
+      username: profile?.username || '',
+      full_name: profile?.full_name || '',
+    })
+  }, [profile?.username, profile?.full_name])
+
+  useEffect(() => {
+    if (!user?.id) return
+    setPreferences(loadPreferences(user.id))
+  }, [user?.id])
 
   useEffect(() => {
     async function loadProfileData() {
@@ -239,14 +288,85 @@ export default function Profile() {
     ? Math.round(((lifetimePoints - level.min) / (level.next - level.min)) * 100)
     : 100
 
+  function changeTab(tab) {
+    setSearchParams(tab === 'resumen' ? {} : { tab })
+  }
+
+  function savePreferences(nextPreferences = preferences) {
+    localStorage.setItem(`pricenow_preferences_${user.id}`, JSON.stringify(nextPreferences))
+    setPreferences(nextPreferences)
+    setPreferencesMessage('Preferencias guardadas en este dispositivo.')
+  }
+
+  function updatePreference(field, value) {
+    const next = { ...preferences, [field]: value }
+    savePreferences(next)
+  }
+
+  async function saveProfile(e) {
+    e.preventDefault()
+    setProfileSaving(true)
+    setProfileMessage(null)
+
+    const { error: updateError } = await supabase
+      .from('profiles')
+      .update({
+        username: profileForm.username.trim(),
+        full_name: profileForm.full_name.trim(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', user.id)
+
+    if (updateError) {
+      setProfileMessage({ type: 'error', text: updateError.message })
+    } else {
+      setProfileMessage({ type: 'success', text: 'Perfil actualizado. Si no ves el cambio de inmediato, recarga la app.' })
+    }
+
+    setProfileSaving(false)
+  }
+
+  function saveCurrentLocation() {
+    if (!navigator.geolocation) {
+      setPreferencesMessage('Tu navegador no permite guardar ubicación.')
+      return
+    }
+
+    setLocationLoading(true)
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const savedLocation = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: Math.round(position.coords.accuracy || 0),
+          savedAt: new Date().toISOString(),
+        }
+        savePreferences({ ...preferences, savedLocation })
+        setLocationLoading(false)
+      },
+      () => {
+        setPreferencesMessage('No se pudo obtener la ubicación. Puedes mantener tu sector preferido manual.')
+        setLocationLoading(false)
+      },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+    )
+  }
+
   if (loading) return <Spinner />
+
+  const tabs = [
+    ['resumen', 'Resumen'],
+    ['beneficios', 'Beneficios'],
+    ['preferencias', 'Preferencias'],
+    ['configuracion', 'Configuración'],
+  ]
 
   return (
     <div className="px-4 py-5 max-w-lg mx-auto space-y-5">
       <div>
         <h2 className="text-xl font-bold text-slate-900">Mi perfil</h2>
         <p className="text-sm text-slate-500 mt-0.5">
-          Revisa tus aportes, puntos reales y metas de participación.
+          Gestiona tus puntos, beneficios, preferencias y actividad de PriceNow.
         </p>
       </div>
 
@@ -258,12 +378,12 @@ export default function Profile() {
 
       <section className={`rounded-3xl p-5 ${level.bg} border border-white shadow-sm`}>
         <div className="flex items-start justify-between gap-4">
-          <div>
+          <div className="min-w-0">
             <p className="text-xs text-slate-500">Usuario</p>
-            <h3 className="text-lg font-bold text-slate-900">{profile?.username || user?.email}</h3>
-            <p className="text-xs text-slate-500 mt-1">Rol: {profile?.role || 'user'}</p>
+            <h3 className="text-lg font-bold text-slate-900 truncate">{profile?.full_name || profile?.username || user?.email}</h3>
+            <p className="text-xs text-slate-500 mt-1 truncate">@{profile?.username || 'usuario'} · {profile?.role || 'user'}</p>
           </div>
-          <div className="text-right">
+          <div className="text-right shrink-0">
             <p className="text-xs text-slate-500">Nivel</p>
             <p className={`text-lg font-black ${level.color}`}>{level.name}</p>
           </div>
@@ -282,191 +402,395 @@ export default function Profile() {
           </div>
           <ProgressBar value={nextLevelProgress} max={100} />
           <p className="text-[11px] text-slate-500 mt-2">
-            Los puntos ahora se guardan en Supabase. Se suman al aprobar reportes y se descuentan al canjear beneficios.
+            Participa con precios aprobados para subir de nivel y canjear beneficios.
           </p>
         </div>
       </section>
 
-      <div className="grid grid-cols-3 gap-3">
-        <div className="card text-center">
-          <p className="text-2xl font-bold text-success-500">{summary.approved}</p>
-          <p className="text-xs text-slate-500 mt-0.5">Aprobados</p>
-        </div>
-        <div className="card text-center">
-          <p className="text-2xl font-bold text-warning-600">{summary.pending}</p>
-          <p className="text-xs text-slate-500 mt-0.5">Pendientes</p>
-        </div>
-        <div className="card text-center">
-          <p className="text-2xl font-bold text-brand-500">{summary.streak}</p>
-          <p className="text-xs text-slate-500 mt-0.5">Racha</p>
-        </div>
+      <section className="grid grid-cols-2 gap-3">
+        <button
+          type="button"
+          onClick={() => changeTab('beneficios')}
+          className="card text-left active:scale-[0.99] transition-transform"
+        >
+          <p className="text-lg mb-1">🎁</p>
+          <p className="font-bold text-slate-900 text-sm">Beneficios</p>
+          <p className="text-xs text-slate-500 mt-0.5">Cupones y canjes</p>
+        </button>
+        <button
+          type="button"
+          onClick={() => changeTab('preferencias')}
+          className="card text-left active:scale-[0.99] transition-transform"
+        >
+          <p className="text-lg mb-1">📍</p>
+          <p className="font-bold text-slate-900 text-sm">Preferencias</p>
+          <p className="text-xs text-slate-500 mt-0.5">Zona y ubicación</p>
+        </button>
+        <Link to="/add" className="card text-left active:scale-[0.99] transition-transform">
+          <p className="text-lg mb-1">➕</p>
+          <p className="font-bold text-slate-900 text-sm">Ingresar precio</p>
+          <p className="text-xs text-slate-500 mt-0.5">Nuevo aporte</p>
+        </Link>
+        {isValidator ? (
+          <Link to="/validate" className="card text-left border-warning-100 bg-warning-50/40 active:scale-[0.99] transition-transform">
+            <p className="text-lg mb-1">🛡️</p>
+            <p className="font-bold text-slate-900 text-sm">Panel admin</p>
+            <p className="text-xs text-slate-500 mt-0.5">Validar reportes</p>
+          </Link>
+        ) : (
+          <button
+            type="button"
+            onClick={() => changeTab('configuracion')}
+            className="card text-left active:scale-[0.99] transition-transform"
+          >
+            <p className="text-lg mb-1">⚙️</p>
+            <p className="font-bold text-slate-900 text-sm">Configuración</p>
+            <p className="text-xs text-slate-500 mt-0.5">Personalización</p>
+          </button>
+        )}
+      </section>
+
+      <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+        {tabs.map(([id, label]) => (
+          <TabButton key={id} id={id} active={activeTab === id} onClick={changeTab}>{label}</TabButton>
+        ))}
       </div>
 
-      <section className="card">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="font-bold text-slate-900">Metas activas</h3>
-            <p className="text-xs text-slate-500">Los puntos se entregan cuando el admin aprueba los reportes.</p>
-          </div>
+      {activeTab === 'beneficios' && (
+        <div className="-mx-4">
+          <Benefits />
         </div>
-        <div className="space-y-3">
-          <MissionCard
-            title="Meta diaria"
-            description="Ingresa al menos 1 precio hoy."
-            value={summary.sentToday}
-            max={1}
-            reward="Puntos cuando sea aprobado"
-          />
-          <MissionCard
-            title="Meta semanal"
-            description="Consigue 5 precios aprobados esta semana."
-            value={summary.approvedWeek}
-            max={5}
-            reward="Avance de nivel y más puntos disponibles"
-          />
-          <MissionCard
-            title="Meta mensual"
-            description="Consigue 20 precios aprobados este mes."
-            value={summary.approvedMonth}
-            max={20}
-            reward="Preparado para beneficios destacados"
-          />
-        </div>
-      </section>
+      )}
 
-      <section className="card">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-bold text-slate-900">Beneficios y cupones</h3>
-          <Link to="/benefits" className="text-xs font-semibold text-brand-500">Ver beneficios</Link>
+      {activeTab === 'resumen' && (
+        <>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="card text-center">
+              <p className="text-2xl font-bold text-success-500">{summary.approved}</p>
+              <p className="text-xs text-slate-500 mt-0.5">Aprobados</p>
+            </div>
+            <div className="card text-center">
+              <p className="text-2xl font-bold text-warning-600">{summary.pending}</p>
+              <p className="text-xs text-slate-500 mt-0.5">Pendientes</p>
+            </div>
+            <div className="card text-center">
+              <p className="text-2xl font-bold text-brand-500">{summary.streak}</p>
+              <p className="text-xs text-slate-500 mt-0.5">Racha</p>
+            </div>
+          </div>
+
+          <section className="card">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="font-bold text-slate-900">Metas activas</h3>
+                <p className="text-xs text-slate-500">Los puntos se entregan cuando el admin aprueba los reportes.</p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              <MissionCard
+                title="Meta diaria"
+                description="Ingresa al menos 1 precio hoy."
+                value={summary.sentToday}
+                max={1}
+                reward="Puntos cuando sea aprobado"
+              />
+              <MissionCard
+                title="Meta semanal"
+                description={`Consigue ${preferences.weeklyGoal || 5} precios aprobados esta semana.`}
+                value={summary.approvedWeek}
+                max={Number(preferences.weeklyGoal || 5)}
+                reward="Avance de nivel y puntos disponibles"
+              />
+              <MissionCard
+                title="Meta mensual"
+                description="Consigue 20 precios aprobados este mes."
+                value={summary.approvedMonth}
+                max={20}
+                reward="Preparado para beneficios destacados"
+              />
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-slate-900">Beneficios recientes</h3>
+              <button type="button" onClick={() => changeTab('beneficios')} className="text-xs font-semibold text-brand-500">Ver beneficios</button>
+            </div>
+            {redemptions.length === 0 ? (
+              <div className="rounded-2xl bg-brand-50 border border-brand-100 p-4">
+                <p className="font-bold text-brand-700 text-sm">Canjea puntos</p>
+                <p className="text-xs text-brand-700/70 mt-1">
+                  Tus cupones canjeados aparecerán aquí. Los beneficios disponibles están en esta misma sección de Perfil.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {redemptions.map(redemption => (
+                  <div key={redemption.id} className="rounded-2xl bg-slate-50 border border-slate-100 p-3 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-bold text-slate-800 text-sm truncate">{redemption.coupons?.title || 'Beneficio'}</p>
+                      <p className="text-xs text-slate-400 truncate">{redemption.coupons?.business_partners?.name || 'PriceNow'}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="font-black text-brand-600">{redemption.code}</p>
+                      <p className="text-[11px] text-slate-400">-{redemption.points_spent} pts</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="grid grid-cols-2 gap-3">
+            <div className="card">
+              <p className="text-xs text-slate-500">Con ubicación</p>
+              <p className="text-xl font-bold text-slate-900 mt-1">{summary.withLocation}</p>
+              <p className="text-[11px] text-slate-400 mt-1">Ayuda al mapa y negocios cercanos.</p>
+            </div>
+            <div className="card">
+              <p className="text-xs text-slate-500">Con foto</p>
+              <p className="text-xl font-bold text-slate-900 mt-1">{summary.withReceipt}</p>
+              <p className="text-[11px] text-slate-400 mt-1">Aumenta la confianza del dato.</p>
+            </div>
+            <div className="card">
+              <p className="text-xs text-slate-500">Tasa aprobación</p>
+              <p className="text-xl font-bold text-slate-900 mt-1">{summary.approvalRate == null ? '—' : `${summary.approvalRate}%`}</p>
+              <p className="text-[11px] text-slate-400 mt-1">Solo sobre datos validados.</p>
+            </div>
+            <div className="card">
+              <p className="text-xs text-slate-500">Total enviados</p>
+              <p className="text-xl font-bold text-slate-900 mt-1">{summary.total}</p>
+              <p className="text-[11px] text-slate-400 mt-1">Historial de participación.</p>
+            </div>
+          </section>
+
+          {transactions.length > 0 && (
+            <section className="card">
+              <h3 className="font-bold text-slate-900 mb-3">Movimientos de puntos</h3>
+              <div className="space-y-2">
+                {transactions.slice(0, 6).map(transaction => (
+                  <div key={transaction.id} className="flex items-center justify-between gap-3 text-sm">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-700 truncate">{transactionLabel(transaction.reason)}</p>
+                      <p className="text-xs text-slate-400 truncate">{new Date(transaction.created_at).toLocaleDateString('es-CL')}</p>
+                    </div>
+                    <span className={`font-black ${transaction.points >= 0 ? 'text-success-600' : 'text-danger-600'}`}>
+                      {transaction.points > 0 ? '+' : ''}{transaction.points}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {(summary.topStores.length > 0 || summary.topProducts.length > 0) && (
+            <section className="card">
+              <h3 className="font-bold text-slate-900 mb-3">Tu actividad destacada</h3>
+              {summary.topStores.length > 0 && (
+                <div className="mb-4">
+                  <p className="text-xs font-semibold text-slate-500 mb-2">Negocios donde más aportaste</p>
+                  <div className="space-y-2">
+                    {summary.topStores.map(store => (
+                      <div key={store.name} className="flex justify-between text-sm">
+                        <span className="text-slate-700 truncate">{store.name}</span>
+                        <span className="font-semibold text-brand-600">{store.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {summary.topProducts.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 mb-2">Productos más reportados</p>
+                  <div className="space-y-2">
+                    {summary.topProducts.map(product => (
+                      <div key={product.name} className="flex justify-between text-sm">
+                        <span className="text-slate-700 truncate">{product.name}</span>
+                        <span className="font-semibold text-brand-600">{product.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          <section className="card">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-slate-900">Últimos aportes</h3>
+              <Link to="/add" className="text-xs font-semibold text-brand-500">Ingresar precio</Link>
+            </div>
+            {summary.recent.length === 0 ? (
+              <p className="text-sm text-slate-500">Todavía no tienes precios ingresados.</p>
+            ) : (
+              <div className="space-y-2">
+                {summary.recent.map(entry => (
+                  <div key={entry.id} className="rounded-2xl bg-slate-50 border border-slate-100 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-slate-800 text-sm truncate">{entry.product_name}</p>
+                        <p className="text-xs text-slate-400 truncate">{entry.store_name} · {entry.purchase_date}</p>
+                      </div>
+                      <span className={`text-[11px] font-bold px-2 py-1 rounded-full shrink-0 ${
+                        entry.validation_status === 'approved'
+                          ? 'bg-success-50 text-success-600'
+                          : entry.validation_status === 'rejected'
+                            ? 'bg-danger-50 text-danger-600'
+                            : 'bg-warning-50 text-warning-600'
+                      }`}>
+                        {entry.validation_status === 'approved' ? 'Aprobado' : entry.validation_status === 'rejected' ? 'Rechazado' : 'Pendiente'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
+      {activeTab === 'preferencias' && (
+        <div className="space-y-4">
+          <section className="card">
+            <h3 className="font-bold text-slate-900 mb-1">Editar perfil</h3>
+            <p className="text-xs text-slate-500 mb-4">Ajusta cómo se muestra tu cuenta dentro de PriceNow.</p>
+            <form onSubmit={saveProfile} className="space-y-3">
+              <div>
+                <label className="input-label">Nombre público</label>
+                <input
+                  className="input-field"
+                  value={profileForm.full_name}
+                  onChange={e => setProfileForm(prev => ({ ...prev, full_name: e.target.value }))}
+                  placeholder="Tu nombre o apodo"
+                />
+              </div>
+              <div>
+                <label className="input-label">Usuario</label>
+                <input
+                  className="input-field"
+                  value={profileForm.username}
+                  onChange={e => setProfileForm(prev => ({ ...prev, username: e.target.value }))}
+                  placeholder="usuario"
+                />
+              </div>
+              {profileMessage && (
+                <p className={`text-sm ${profileMessage.type === 'error' ? 'text-danger-600' : 'text-success-600'}`}>
+                  {profileMessage.text}
+                </p>
+              )}
+              <button type="submit" disabled={profileSaving} className="btn-primary w-full">
+                {profileSaving ? 'Guardando...' : 'Guardar perfil'}
+              </button>
+            </form>
+          </section>
+
+          <section className="card">
+            <h3 className="font-bold text-slate-900 mb-1">Ubicaciones y zona preferida</h3>
+            <p className="text-xs text-slate-500 mb-4">Sirve para ordenar precios cercanos y reducir información innecesaria.</p>
+            <div className="space-y-3">
+              <div>
+                <label className="input-label">Sector preferido</label>
+                <input
+                  className="input-field"
+                  value={preferences.favoriteSector}
+                  onChange={e => updatePreference('favoriteSector', e.target.value)}
+                  placeholder="Ej: Santa Filomena, Centro, República de Chile"
+                />
+              </div>
+              <div>
+                <label className="input-label">Referencia opcional</label>
+                <input
+                  className="input-field"
+                  value={preferences.homeReference}
+                  onChange={e => updatePreference('homeReference', e.target.value)}
+                  placeholder="Ej: cerca de Av. X / población Y"
+                />
+              </div>
+              <div className="rounded-2xl bg-slate-50 border border-slate-100 p-3">
+                <p className="text-xs text-slate-500">Ubicación guardada en este dispositivo</p>
+                <p className="font-semibold text-slate-800 text-sm mt-1">{formatLocation(preferences.savedLocation)}</p>
+                {preferences.savedLocation?.accuracy && (
+                  <p className="text-xs text-slate-400 mt-0.5">Precisión aprox.: {preferences.savedLocation.accuracy} m</p>
+                )}
+                <button type="button" onClick={saveCurrentLocation} disabled={locationLoading} className="btn-secondary w-full mt-3">
+                  {locationLoading ? 'Guardando ubicación...' : 'Guardar mi ubicación actual'}
+                </button>
+              </div>
+              {preferencesMessage && <p className="text-xs text-brand-600">{preferencesMessage}</p>}
+            </div>
+          </section>
         </div>
-        {redemptions.length === 0 ? (
-          <div className="rounded-2xl bg-brand-50 border border-brand-100 p-4">
-            <p className="font-bold text-brand-700 text-sm">Canjea puntos</p>
-            <p className="text-xs text-brand-700/70 mt-1">
-              Cuando existan negocios asociados, podrás usar tus puntos para obtener descuentos.
+      )}
+
+      {activeTab === 'configuracion' && (
+        <div className="space-y-4">
+          <section className="card">
+            <h3 className="font-bold text-slate-900 mb-1">Personalización</h3>
+            <p className="text-xs text-slate-500 mb-4">Preferencias guardadas localmente en este dispositivo.</p>
+            <div className="space-y-3">
+              <label className="flex items-start justify-between gap-3 rounded-2xl border border-slate-100 p-3">
+                <div>
+                  <p className="font-semibold text-slate-800 text-sm">Modo compacto</p>
+                  <p className="text-xs text-slate-500">Muestra tarjetas más resumidas cuando sea posible.</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={!!preferences.compactMode}
+                  onChange={e => updatePreference('compactMode', e.target.checked)}
+                  className="mt-1"
+                />
+              </label>
+
+              <label className="flex items-start justify-between gap-3 rounded-2xl border border-slate-100 p-3">
+                <div>
+                  <p className="font-semibold text-slate-800 text-sm">Priorizar precios cercanos</p>
+                  <p className="text-xs text-slate-500">Da más importancia a negocios cerca de tu zona.</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={!!preferences.nearbyFirst}
+                  onChange={e => updatePreference('nearbyFirst', e.target.checked)}
+                  className="mt-1"
+                />
+              </label>
+
+              <label className="flex items-start justify-between gap-3 rounded-2xl border border-slate-100 p-3">
+                <div>
+                  <p className="font-semibold text-slate-800 text-sm">Consejos económicos</p>
+                  <p className="text-xs text-slate-500">Permite mostrar explicaciones breves sobre variaciones de precios.</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={!!preferences.showEconomicTips}
+                  onChange={e => updatePreference('showEconomicTips', e.target.checked)}
+                  className="mt-1"
+                />
+              </label>
+
+              <div className="rounded-2xl border border-slate-100 p-3">
+                <label className="input-label">Meta semanal personalizada</label>
+                <select
+                  className="input-field"
+                  value={preferences.weeklyGoal}
+                  onChange={e => updatePreference('weeklyGoal', Number(e.target.value))}
+                >
+                  <option value={3}>3 precios aprobados</option>
+                  <option value={5}>5 precios aprobados</option>
+                  <option value={10}>10 precios aprobados</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section className="card bg-slate-900 text-white border-slate-900">
+            <h3 className="font-bold">Diseño simplificado</h3>
+            <p className="text-sm text-white/70 mt-1">
+              Beneficios vive dentro de Perfil y Reportes vive dentro de Precios. Así la navegación principal queda más limpia.
             </p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {redemptions.map(redemption => (
-              <div key={redemption.id} className="rounded-2xl bg-slate-50 border border-slate-100 p-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="font-bold text-slate-800 text-sm truncate">{redemption.coupons?.title || 'Beneficio'}</p>
-                  <p className="text-xs text-slate-400 truncate">{redemption.coupons?.business_partners?.name || 'PriceNow'}</p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="font-black text-brand-600">{redemption.code}</p>
-                  <p className="text-[11px] text-slate-400">-{redemption.points_spent} pts</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="grid grid-cols-2 gap-3">
-        <div className="card">
-          <p className="text-xs text-slate-500">Con ubicación</p>
-          <p className="text-xl font-bold text-slate-900 mt-1">{summary.withLocation}</p>
-          <p className="text-[11px] text-slate-400 mt-1">Ayuda al mapa y negocios cercanos.</p>
+          </section>
         </div>
-        <div className="card">
-          <p className="text-xs text-slate-500">Con foto</p>
-          <p className="text-xl font-bold text-slate-900 mt-1">{summary.withReceipt}</p>
-          <p className="text-[11px] text-slate-400 mt-1">Aumenta la confianza del dato.</p>
-        </div>
-        <div className="card">
-          <p className="text-xs text-slate-500">Tasa aprobación</p>
-          <p className="text-xl font-bold text-slate-900 mt-1">{summary.approvalRate == null ? '—' : `${summary.approvalRate}%`}</p>
-          <p className="text-[11px] text-slate-400 mt-1">Solo sobre datos validados.</p>
-        </div>
-        <div className="card">
-          <p className="text-xs text-slate-500">Total enviados</p>
-          <p className="text-xl font-bold text-slate-900 mt-1">{summary.total}</p>
-          <p className="text-[11px] text-slate-400 mt-1">Historial de participación.</p>
-        </div>
-      </section>
-
-      {transactions.length > 0 && (
-        <section className="card">
-          <h3 className="font-bold text-slate-900 mb-3">Movimientos de puntos</h3>
-          <div className="space-y-2">
-            {transactions.slice(0, 6).map(transaction => (
-              <div key={transaction.id} className="flex items-center justify-between gap-3 text-sm">
-                <div className="min-w-0">
-                  <p className="font-semibold text-slate-700 truncate">{transactionLabel(transaction.reason)}</p>
-                  <p className="text-xs text-slate-400 truncate">{new Date(transaction.created_at).toLocaleDateString('es-CL')}</p>
-                </div>
-                <span className={`font-black ${transaction.points >= 0 ? 'text-success-600' : 'text-danger-600'}`}>
-                  {transaction.points > 0 ? '+' : ''}{transaction.points}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
       )}
-
-      {(summary.topStores.length > 0 || summary.topProducts.length > 0) && (
-        <section className="card">
-          <h3 className="font-bold text-slate-900 mb-3">Tu actividad destacada</h3>
-          {summary.topStores.length > 0 && (
-            <div className="mb-4">
-              <p className="text-xs font-semibold text-slate-500 mb-2">Negocios donde más aportaste</p>
-              <div className="space-y-2">
-                {summary.topStores.map(store => (
-                  <div key={store.name} className="flex justify-between text-sm">
-                    <span className="text-slate-700 truncate">{store.name}</span>
-                    <span className="font-semibold text-brand-600">{store.count}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {summary.topProducts.length > 0 && (
-            <div>
-              <p className="text-xs font-semibold text-slate-500 mb-2">Productos más reportados</p>
-              <div className="space-y-2">
-                {summary.topProducts.map(product => (
-                  <div key={product.name} className="flex justify-between text-sm">
-                    <span className="text-slate-700 truncate">{product.name}</span>
-                    <span className="font-semibold text-brand-600">{product.count}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
-
-      <section>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-slate-700">Últimos aportes</h3>
-          <Link to="/add" className="text-xs font-semibold text-brand-500">Ingresar precio</Link>
-        </div>
-
-        {summary.recent.length === 0 ? (
-          <div className="card text-center py-8">
-            <p className="text-3xl mb-2">🛒</p>
-            <p className="text-sm text-slate-500">Todavía no has ingresado precios.</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {summary.recent.map(entry => (
-              <div key={entry.id} className="card flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="font-semibold text-slate-800 text-sm truncate">{entry.product_name}</p>
-                  <p className="text-xs text-slate-400 truncate">{entry.store_name}</p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="font-bold text-brand-500 text-sm">{formatCLP(entry.price)}</p>
-                  {statusBadge(entry.validation_status)}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
     </div>
   )
 }
