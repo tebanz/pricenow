@@ -86,14 +86,110 @@ function markerPosition(origin, place) {
   return { left: `${left}%`, top: `${top}%` }
 }
 
-function makeStoreKey(name, sector, lat, lng) {
-  return `${normalizeText(name)}__${normalizeText(sector)}__${Number(lat || 0).toFixed(4)}__${Number(lng || 0).toFixed(4)}`
+const DUPLICATE_RADIUS_KM = 0.35
+
+function canonicalBusinessName(name = '', chain = '') {
+  const text = normalizeText(`${chain} ${name}`)
+  const knownChains = [
+    'santa isabel',
+    'lider',
+    'jumbo',
+    'unimarc',
+    'acuenta',
+    'mayorista 10',
+    'tottus',
+    'ok market',
+    'oxxo',
+    'ekono',
+  ]
+
+  const chainMatch = knownChains.find(chainName => text.includes(chainName))
+  if (chainMatch) return chainMatch
+
+  return text
+    .replace(/\b(supermercado|supermercados|minimarket|mini market|market|almacen|almacenes|tienda|local|sucursal|rancagua)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || text
+}
+
+function isDuplicatePlace(a, b) {
+  if (!a || !b) return false
+  if (a.lat == null || a.lng == null || b.lat == null || b.lng == null) return false
+
+  const distanceBetweenPoints = distanceKm(
+    { lat: a.lat, lng: a.lng },
+    { lat: b.lat, lng: b.lng }
+  )
+
+  if (distanceBetweenPoints == null || distanceBetweenPoints > DUPLICATE_RADIUS_KM) return false
+
+  const aName = canonicalBusinessName(a.name, a.chain)
+  const bName = canonicalBusinessName(b.name, b.chain)
+
+  if (!aName || !bName) return false
+  if (aName === bName) return true
+
+  const minLength = Math.min(aName.length, bName.length)
+  if (minLength >= 5 && (aName.includes(bName) || bName.includes(aName))) return true
+
+  return false
+}
+
+function chooseDisplayName(currentName, nextName) {
+  const current = currentName || ''
+  const next = nextName || ''
+  if (!current) return next
+  if (!next) return current
+  if (normalizeText(next).includes(normalizeText(current)) && next.length > current.length) return next
+  if (next.length > current.length + 8) return next
+  return current
+}
+
+function mergePlace(existing, candidate, location) {
+  const candidateDistance = distanceKm(location, { lat: candidate.lat, lng: candidate.lng })
+  const existingDistance = distanceKm(location, { lat: existing.lat, lng: existing.lng })
+
+  const useCandidatePosition = candidateDistance != null && (
+    existingDistance == null || candidateDistance < existingDistance
+  )
+
+  const mergedPrices = [...(existing.prices || []), ...(candidate.prices || [])]
+  const priceIds = new Set()
+  const uniquePrices = mergedPrices.filter(price => {
+    const key = price.id || `${price.product_name}-${price.unit_price}-${price.purchase_date}`
+    if (priceIds.has(key)) return false
+    priceIds.add(key)
+    return true
+  })
+
+  return {
+    ...existing,
+    name: chooseDisplayName(existing.name, candidate.name),
+    chain: existing.chain || candidate.chain || '',
+    type: existing.type === 'Tienda conocida' ? existing.type : (candidate.type || existing.type),
+    sector: existing.sector || candidate.sector || '',
+    address: existing.address || candidate.address || '',
+    lat: useCandidatePosition ? candidate.lat : existing.lat,
+    lng: useCandidatePosition ? candidate.lng : existing.lng,
+    distance_km: useCandidatePosition ? candidateDistance : existingDistance,
+    source: existing.source === candidate.source ? existing.source : 'combined',
+    prices: uniquePrices,
+  }
+}
+
+function addOrMergePlace(places, candidate, location) {
+  const index = places.findIndex(place => isDuplicatePlace(place, candidate))
+  if (index >= 0) {
+    places[index] = mergePlace(places[index], candidate, location)
+  } else {
+    places.push(candidate)
+  }
 }
 
 function buildNearbyPlaces(location, stores, approvedEntries) {
   if (!location) return []
 
-  const places = new Map()
+  const places = []
 
   stores.forEach(store => {
     if (store.latitude == null || store.longitude == null) return
@@ -102,9 +198,8 @@ function buildNearbyPlaces(location, stores, approvedEntries) {
     const km = distanceKm(location, { lat, lng })
     if (km == null || km > 20) return
 
-    const key = makeStoreKey(store.name, store.sector, lat, lng)
-    places.set(key, {
-      id: key,
+    addOrMergePlace(places, {
+      id: `store-${store.id || `${normalizeText(store.name)}-${lat}-${lng}`}`,
       name: store.name,
       chain: store.chain || '',
       type: store.chain || 'Tienda conocida',
@@ -115,7 +210,7 @@ function buildNearbyPlaces(location, stores, approvedEntries) {
       distance_km: km,
       source: 'store',
       prices: [],
-    })
+    }, location)
   })
 
   approvedEntries.forEach(entry => {
@@ -125,40 +220,37 @@ function buildNearbyPlaces(location, stores, approvedEntries) {
     const km = distanceKm(location, { lat, lng })
     if (km == null || km > 20) return
 
-    const key = makeStoreKey(entry.store_name, entry.sector, lat, lng)
-    if (!places.has(key)) {
-      places.set(key, {
-        id: key,
-        name: entry.store_name,
-        chain: '',
-        type: 'Reportado en PriceNow',
-        sector: entry.sector || '',
-        address: entry.sector || '',
-        lat,
-        lng,
-        distance_km: km,
-        source: 'report',
-        prices: [],
-      })
-    }
-
-    const place = places.get(key)
     const unitPrice = Number(entry.unit_price)
-    if (Number.isFinite(unitPrice) && unitPrice > 0) {
-      place.prices.push({
-        id: entry.id,
-        product_name: getProductName(entry),
-        unit: getStandardUnit(entry),
-        unit_price: unitPrice,
-        price: Number(entry.price),
-        purchase_date: entry.purchase_date,
-      })
-    }
+    const prices = Number.isFinite(unitPrice) && unitPrice > 0
+      ? [{
+          id: entry.id,
+          product_name: getProductName(entry),
+          unit: getStandardUnit(entry),
+          unit_price: unitPrice,
+          price: Number(entry.price),
+          purchase_date: entry.purchase_date,
+        }]
+      : []
+
+    addOrMergePlace(places, {
+      id: `report-${entry.id}`,
+      name: entry.store_name,
+      chain: '',
+      type: 'Reportado en PriceNow',
+      sector: entry.sector || '',
+      address: entry.sector || '',
+      lat,
+      lng,
+      distance_km: km,
+      source: 'report',
+      prices,
+    }, location)
   })
 
-  return Array.from(places.values())
+  return places
     .map(place => ({
       ...place,
+      distance_km: distanceKm(location, { lat: place.lat, lng: place.lng }),
       best_price: place.prices.length
         ? place.prices.slice().sort((a, b) => a.unit_price - b.unit_price)[0]
         : null,

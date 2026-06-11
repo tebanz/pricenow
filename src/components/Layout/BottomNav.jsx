@@ -26,7 +26,7 @@ const navItems = [
     label: 'Ranking',
     icon: (active) => (
       <svg className={`w-5 h-5 ${active ? 'fill-brand-500' : 'fill-slate-400'}`} viewBox="0 0 24 24">
-        <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
+        <path d="M7 20h10v-2H7v2zm3.31-6.9L8.9 11.69 12 8.59l3.1 3.1-1.41 1.41L13 12.41V17h-2v-4.59l-.69.69zM12 2C6.48 2 2 6.48 2 12c0 1.85.5 3.58 1.38 5.06l1.46-1.46C4.3 14.53 4 13.3 4 12c0-4.42 3.58-8 8-8s8 3.58 8 8c0 1.3-.3 2.53-.84 3.6l1.46 1.46C21.5 15.58 22 13.85 22 12c0-5.52-4.48-10-10-10z"/>
       </svg>
     ),
   },
@@ -36,6 +36,15 @@ const navItems = [
     icon: (active) => (
       <svg className={`w-5 h-5 ${active ? 'fill-brand-500' : 'fill-slate-400'}`} viewBox="0 0 24 24">
         <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>
+      </svg>
+    ),
+  },
+  {
+    to: '/profile',
+    label: 'Perfil',
+    icon: (active) => (
+      <svg className={`w-5 h-5 ${active ? 'fill-brand-500' : 'fill-slate-400'}`} viewBox="0 0 24 24">
+        <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
       </svg>
     ),
   },
@@ -53,7 +62,7 @@ export default function BottomNav() {
             to={to}
             end={to === '/'}
             className={({ isActive }) =>
-              `flex flex-col items-center py-2 px-3 min-w-0 flex-1 transition-colors ${
+              `flex flex-col items-center py-2 px-2 min-w-0 flex-1 transition-colors ${
                 isActive ? 'text-brand-500' : 'text-slate-400'
               }`
             }
@@ -83,7 +92,7 @@ export default function BottomNav() {
           <NavLink
             to="/validate"
             className={({ isActive }) =>
-              `flex flex-col items-center py-2 px-3 min-w-0 flex-1 transition-colors ${
+              `flex flex-col items-center py-2 px-2 min-w-0 flex-1 transition-colors ${
                 isActive ? 'text-warning-600' : 'text-slate-400'
               }`
             }

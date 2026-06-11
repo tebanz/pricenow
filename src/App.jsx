@@ -8,6 +8,7 @@ import AddPrice from './pages/AddPrice'
 import Ranking from './pages/Ranking'
 import Report from './pages/Report'
 import Validate from './pages/Validate'
+import Profile from './pages/Profile'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="add" element={<AddPrice />} />
         <Route path="ranking" element={<Ranking />} />
         <Route path="report"  element={<Report />} />
+        <Route path="profile" element={<Profile />} />
         <Route path="validate" element={
           <ValidatorRoute>
             <Validate />
