@@ -39,6 +39,16 @@ function distanceKm(a, b) {
   return R * c
 }
 
+
+
+function formatDistanceKm(km) {
+  if (km == null || Number.isNaN(Number(km))) return 'distancia no disponible'
+  const meters = Math.round(Number(km) * 1000)
+  if (meters < 1000) return `${meters} m`
+  if (meters < 10000) return `${Number(km).toFixed(1).replace('.0', '')} km`
+  return `${Math.round(Number(km))} km`
+}
+
 function osmElementPosition(element) {
   const lat = element.lat ?? element.center?.lat
   const lng = element.lon ?? element.center?.lon
@@ -76,6 +86,112 @@ function normalizeOsmPlace(element, origin) {
     distance_km: distanceKm(origin, position),
     source: 'openstreetmap_overpass',
   }
+}
+
+function normalizeText(value = '') {
+  return value
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function normalizePriceNowPlace(row, origin) {
+  if (!row?.store_name || row.purchase_latitude == null || row.purchase_longitude == null) return null
+
+  const position = {
+    lat: Number(row.purchase_latitude),
+    lng: Number(row.purchase_longitude),
+  }
+
+  const distance_km = distanceKm(origin, position)
+  if (distance_km == null || distance_km > 20) return null
+
+  return {
+    id: `pricenow-${normalizeText(row.store_name)}-${row.sector || 'sin-sector'}-${position.lat}-${position.lng}`,
+    name: row.store_name,
+    type: 'reportado en PriceNow',
+    address: row.sector || '',
+    sector: row.sector || '',
+    lat: Number(position.lat.toFixed(7)),
+    lng: Number(position.lng.toFixed(7)),
+    distance_km,
+    source: 'pricenow_reports',
+  }
+}
+
+
+function normalizeKnownStorePlace(store, origin, includeWithoutDistance = false) {
+  if (!store?.name) return null
+
+  const hasCoords = store.latitude != null && store.longitude != null
+  const position = hasCoords
+    ? { lat: Number(store.latitude), lng: Number(store.longitude) }
+    : null
+
+  const distance_km = position ? distanceKm(origin, position) : null
+  if (distance_km != null && distance_km > 25) return null
+  if (distance_km == null && !includeWithoutDistance) return null
+
+  return {
+    id: `store-${store.id}`,
+    store_id: store.id,
+    name: store.name,
+    type: store.chain || 'tienda conocida',
+    address: store.address || store.sector || '',
+    sector: store.sector || '',
+    lat: position ? Number(position.lat.toFixed(7)) : null,
+    lng: position ? Number(position.lng.toFixed(7)) : null,
+    distance_km,
+    source: 'pricenow_known_store',
+  }
+}
+
+function sourceLabel(source) {
+  if (source === 'pricenow_reports') return 'PriceNow'
+  if (source === 'pricenow_known_store') return 'Tienda conocida'
+  if (source && source.includes('openstreetmap')) return 'OpenStreetMap'
+  return 'Referencia'
+}
+
+function mergeNearbyPlaces(places) {
+  const unique = new Map()
+
+  places
+    .filter(place => place?.name)
+    .sort((a, b) => (a.distance_km ?? 9999) - (b.distance_km ?? 9999))
+    .forEach(place => {
+      const key = `${normalizeText(place.name)}-${normalizeText(place.address || place.sector || '')}`
+      if (!key.trim()) return
+
+      const existing = unique.get(key)
+      if (!existing || (place.distance_km ?? 9999) < (existing.distance_km ?? 9999)) {
+        unique.set(key, {
+          ...place,
+          distance_km: place.distance_km == null ? null : Number(Number(place.distance_km).toFixed(3)),
+        })
+      }
+    })
+
+  return Array.from(unique.values()).sort((a, b) => (a.distance_km ?? 9999) - (b.distance_km ?? 9999))
+}
+
+async function fetchNearbyPriceNowPlaces(location) {
+  const { data, error } = await supabase
+    .from('price_entries')
+    .select('store_name, sector, purchase_latitude, purchase_longitude, purchase_date, validation_status')
+    .not('purchase_latitude', 'is', null)
+    .not('purchase_longitude', 'is', null)
+    .order('purchase_date', { ascending: false })
+    .limit(500)
+
+  if (error) throw error
+
+  return (data || [])
+    .map(row => normalizePriceNowPlace(row, location))
+    .filter(Boolean)
 }
 
 const OVERPASS_ENDPOINTS = [
@@ -130,10 +246,19 @@ async function fetchNearbyPlacesWithApiProxy(location) {
     lng: String(location.lng),
   })
 
-  const response = await fetch(`/api/nearby-osm?${params.toString()}`, {
-    method: 'GET',
-    cache: 'no-store',
-  })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 6500)
+
+  let response
+  try {
+    response = await fetch(`/api/nearby-osm?${params.toString()}`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
 
   const contentType = response.headers.get('content-type') || ''
   if (!response.ok || !contentType.includes('application/json')) {
@@ -275,7 +400,8 @@ export default function AddPrice() {
     setForm(prev => ({
       ...prev,
       store_name: place.name,
-      _store_id: null,
+      sector: place.sector || prev.sector,
+      _store_id: place.store_id || null,
     }))
   }
 
@@ -289,65 +415,46 @@ export default function AddPrice() {
     setOsmLoading(true)
     setOsmSearched(true)
 
-    const radii = [3000, 7000, 15000]
+    const combinedResults = []
     let lastError = null
-    let hadSuccessfulResponse = false
 
     try {
-      // En Vercel usamos primero una función /api propia para evitar diferencias de CORS
-      // entre localhost y producción.
+      // 1) Respuesta rápida: usar primero tiendas conocidas guardadas en PriceNow.
+      // Esto evita depender de OpenStreetMap para supermercados conocidos que no estén bien mapeados.
+      const knownStoreResults = stores
+        .map(store => normalizeKnownStorePlace(store, location, false))
+        .filter(Boolean)
+
+      combinedResults.push(...knownStoreResults)
+
+      try {
+        const priceNowResults = await fetchNearbyPriceNowPlaces(location)
+        combinedResults.push(...priceNowResults)
+      } catch (priceNowError) {
+        lastError = priceNowError
+        console.warn('PriceNow nearby places error:', priceNowError)
+      }
+
+      const quickResults = mergeNearbyPlaces(combinedResults).slice(0, 20)
+      setOsmPlaces(quickResults)
+
+      // 2) OpenStreetMap queda como complemento. Si demora o falla, no bloquea la búsqueda.
       try {
         const proxyResults = await fetchNearbyPlacesWithApiProxy(location)
-        hadSuccessfulResponse = true
-        if (proxyResults.length > 0) {
-          setOsmPlaces(proxyResults)
-          return
-        }
+        combinedResults.push(...proxyResults)
+        setOsmPlaces(mergeNearbyPlaces(combinedResults).slice(0, 20))
       } catch (proxyError) {
         lastError = proxyError
       }
 
-      // Fallback para localhost/Vite o si la función /api no está disponible.
-      for (const radius of radii) {
-        const query = buildOverpassNearbyQuery(location.lat, location.lng, radius)
-
-        for (const endpoint of OVERPASS_ENDPOINTS) {
-          try {
-            const data = await fetchOverpass(endpoint, query)
-            hadSuccessfulResponse = true
-            const unique = new Map()
-
-            ;(data.elements || [])
-              .map(element => normalizeOsmPlace(element, location))
-              .filter(Boolean)
-              .filter(place => place.distance_km != null)
-              .sort((a, b) => a.distance_km - b.distance_km)
-              .forEach(place => {
-                const key = `${place.name.toLowerCase()}-${place.lat}-${place.lng}`
-                if (!unique.has(key)) unique.set(key, place)
-              })
-
-            const results = Array.from(unique.values()).slice(0, 12)
-            if (results.length > 0) {
-              setOsmPlaces(results)
-              return
-            }
-          } catch (err) {
-            lastError = err
-          }
-        }
-      }
-
-      setOsmPlaces([])
-      if (!hadSuccessfulResponse) {
-        setError('No se pudo consultar OpenStreetMap. Puedes elegir una tienda conocida o escribirla manualmente.')
-      }
+      const finalResults = mergeNearbyPlaces(combinedResults).slice(0, 20)
+      setOsmPlaces(finalResults)
     } catch (err) {
       lastError = err
       setError('No se pudieron detectar negocios cercanos. Puedes ingresar la tienda manualmente.')
       setOsmPlaces([])
     } finally {
-      if (lastError) console.warn('OpenStreetMap/Overpass error:', lastError)
+      if (lastError) console.warn('Búsqueda de negocios cercanos:', lastError)
       setOsmLoading(false)
     }
   }
@@ -549,7 +656,7 @@ export default function AddPrice() {
                 >
                   <p className="text-sm font-semibold text-slate-800">{store.name}</p>
                   <p className="text-xs text-slate-400">
-                    {store.sector} · aprox. {store.distance_km.toFixed(2)} km
+                    {store.sector} · aprox. {formatDistanceKm(store.distance_km)}
                   </p>
                 </button>
               ))}
@@ -600,7 +707,7 @@ export default function AddPrice() {
                 </button>
 
                 <p className="text-[11px] text-slate-400">
-                  Búsqueda referencial con OpenStreetMap. Si no aparece el local correcto, ingrésalo manualmente.
+                  Primero se revisan reportes y tiendas con coordenadas en PriceNow; luego se consulta OpenStreetMap como apoyo. Si falta un local, escríbelo manualmente junto con tu ubicación exacta para que PriceNow lo aprenda en próximas búsquedas.
                 </p>
 
                 {osmPlaces.length > 0 && (
@@ -615,7 +722,7 @@ export default function AddPrice() {
                       >
                         <p className="text-sm font-semibold text-slate-800">{place.name}</p>
                         <p className="text-xs text-slate-500">
-                          {place.type} · aprox. {place.distance_km.toFixed(2)} km
+                          {place.type} · {place.distance_km != null ? `aprox. ${formatDistanceKm(place.distance_km)} · ` : ''}{sourceLabel(place.source)}
                         </p>
                         {place.address && (
                           <p className="text-xs text-slate-400">{place.address}</p>
@@ -627,7 +734,7 @@ export default function AddPrice() {
 
                 {osmSearched && !osmLoading && osmPlaces.length === 0 && (
                   <p className="text-xs text-slate-500">
-                    No se encontraron negocios cercanos para esta ubicación. Elige una tienda conocida de la lista superior o escríbela manualmente.
+                    No se encontraron negocios cercanos con coordenadas para esta ubicación. Puedes escribir la tienda manualmente y guardar el precio con ubicación exacta; después de aprobarse, PriceNow podrá usarla como referencia cercana.
                   </p>
                 )}
               </div>

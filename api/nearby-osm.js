@@ -81,7 +81,7 @@ function normalize(element, origin) {
   }
 }
 
-async function fetchWithTimeout(url, options, timeoutMs = 8500) {
+async function fetchWithTimeout(url, options, timeoutMs = 3500) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -115,13 +115,13 @@ export default async function handler(req, res) {
   }
 
   const origin = { lat, lng }
-  const radii = [3000, 7000, 15000]
+  const radii = [2000, 5000]
   let lastError = null
 
   for (const radius of radii) {
     const query = buildOverpassNearbyQuery(lat, lng, radius)
 
-    for (const endpoint of OVERPASS_ENDPOINTS) {
+    for (const endpoint of OVERPASS_ENDPOINTS.slice(0, 1)) {
       try {
         const data = await requestOverpass(endpoint, query)
         const unique = new Map()
