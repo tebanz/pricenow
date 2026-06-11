@@ -18,26 +18,68 @@ const EMPTY_FORM = {
   notes: '',
 }
 
+function googleMapsUrl(lat, lng) {
+  if (lat == null || lng == null) return null
+  return `https://www.google.com/maps?q=${lat},${lng}`
+}
+
+function distanceKm(a, b) {
+  if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return null
+  const R = 6371
+  const dLat = (Number(b.lat) - Number(a.lat)) * Math.PI / 180
+  const dLng = (Number(b.lng) - Number(a.lng)) * Math.PI / 180
+  const lat1 = Number(a.lat) * Math.PI / 180
+  const lat2 = Number(b.lat) * Math.PI / 180
+  const sinLat = Math.sin(dLat / 2)
+  const sinLng = Math.sin(dLng / 2)
+  const c = 2 * Math.atan2(
+    Math.sqrt(sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng),
+    Math.sqrt(1 - (sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng))
+  )
+  return R * c
+}
+
 export default function AddPrice() {
   const { user } = useAuth()
   const navigate = useNavigate()
-  const fileRef  = useRef(null)
+  const fileRef = useRef(null)
 
-  const [form,    setForm]    = useState(EMPTY_FORM)
-  const [stores,  setStores]  = useState([])
-  const [photo,   setPhoto]   = useState(null)
+  const [form, setForm] = useState(EMPTY_FORM)
+  const [stores, setStores] = useState([])
+  const [photo, setPhoto] = useState(null)
   const [preview, setPreview] = useState(null)
-  const [error,   setError]   = useState(null)
+  const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
+  const [location, setLocation] = useState(null)
+  const [locationLoading, setLocationLoading] = useState(false)
 
-  // Calcular precio unitario en tiempo real
   const unitPrice = calcUnitPrice(form.price, form.quantity, form.unit)
 
   useEffect(() => {
-    supabase.from('stores').select('id, name, sector').order('name')
+    supabase
+      .from('stores')
+      .select('id, name, sector, address, latitude, longitude')
+      .eq('is_active', true)
+      .order('name')
       .then(({ data }) => { if (data) setStores(data) })
   }, [])
+
+  const nearbyStores = location
+    ? stores
+        .map(store => ({
+          ...store,
+          distance_km: distanceKm(
+            location,
+            store.latitude != null && store.longitude != null
+              ? { lat: store.latitude, lng: store.longitude }
+              : null
+          ),
+        }))
+        .filter(store => store.distance_km != null)
+        .sort((a, b) => a.distance_km - b.distance_km)
+        .slice(0, 5)
+    : []
 
   function handleChange(e) {
     const { name, value } = e.target
@@ -45,21 +87,23 @@ export default function AddPrice() {
     setError(null)
   }
 
+  function applyStore(store) {
+    setForm(prev => ({
+      ...prev,
+      store_name: store.name,
+      sector: store.sector,
+      _store_id: store.id,
+    }))
+  }
+
   function handleStoreSelect(e) {
     const storeId = e.target.value
     if (storeId === 'other') {
-      setForm(prev => ({ ...prev, store_name: '', sector: '' }))
+      setForm(prev => ({ ...prev, store_name: '', sector: '', _store_id: null }))
       return
     }
     const store = stores.find(s => s.id === storeId)
-    if (store) {
-      setForm(prev => ({
-        ...prev,
-        store_name: store.name,
-        sector: store.sector,
-        _store_id: store.id,
-      }))
-    }
+    if (store) applyStore(store)
   }
 
   function handlePhoto(e) {
@@ -73,13 +117,48 @@ export default function AddPrice() {
     setPreview(URL.createObjectURL(file))
   }
 
+  function captureLocation() {
+    setError(null)
+    if (!navigator.geolocation) {
+      setError('Tu navegador no permite obtener ubicación.')
+      return
+    }
+
+    setLocationLoading(true)
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        const nextLocation = {
+          lat: Number(position.coords.latitude.toFixed(7)),
+          lng: Number(position.coords.longitude.toFixed(7)),
+          accuracy: Math.round(position.coords.accuracy),
+          source: 'browser_geolocation',
+        }
+        setLocation(nextLocation)
+        setLocationLoading(false)
+      },
+      () => {
+        setError('No se pudo obtener la ubicación. Revisa los permisos del navegador.')
+        setLocationLoading(false)
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 60000,
+      }
+    )
+  }
+
+  function clearLocation() {
+    setLocation(null)
+  }
+
   function validate() {
     if (!form.product_name.trim()) return 'El nombre del producto es obligatorio.'
     if (!form.quantity || parseFloat(form.quantity) <= 0) return 'La cantidad debe ser mayor a 0.'
-    if (!form.price    || parseFloat(form.price) <= 0)    return 'El precio debe ser mayor a 0.'
+    if (!form.price || parseFloat(form.price) <= 0) return 'El precio debe ser mayor a 0.'
     if (!form.store_name.trim()) return 'La tienda es obligatoria.'
-    if (!form.sector)            return 'El sector es obligatorio.'
-    if (!form.purchase_date)     return 'La fecha de compra es obligatoria.'
+    if (!form.sector) return 'El sector es obligatorio.'
+    if (!form.purchase_date) return 'La fecha de compra es obligatoria.'
     return null
   }
 
@@ -92,10 +171,9 @@ export default function AddPrice() {
 
     let receipt_photo_url = null
 
-    // Subir foto si existe
     if (photo) {
-      const ext      = photo.name.split('.').pop()
-      const path     = `${user.id}/${Date.now()}.${ext}`
+      const ext = photo.name.split('.').pop()
+      const path = `${user.id}/${Date.now()}.${ext}`
       const { error: uploadErr } = await supabase.storage
         .from('receipts')
         .upload(path, photo, { contentType: photo.type, upsert: false })
@@ -109,19 +187,24 @@ export default function AddPrice() {
     }
 
     const { error: insertErr } = await supabase.from('price_entries').insert({
-      user_id:          user.id,
-      product_name:     form.product_name.trim(),
-      brand:            form.brand.trim() || null,
-      quantity:         parseFloat(form.quantity),
-      unit:             form.unit,
-      price:            parseFloat(form.price),
-      unit_price:       unitPrice,
-      store_name:       form.store_name.trim(),
-      store_id:         form._store_id ?? null,
-      sector:           form.sector,
-      purchase_date:    form.purchase_date,
-      notes:            form.notes.trim() || null,
+      user_id: user.id,
+      product_name: form.product_name.trim(),
+      brand: form.brand.trim() || null,
+      quantity: parseFloat(form.quantity),
+      unit: form.unit,
+      price: parseFloat(form.price),
+      unit_price: unitPrice,
+      store_name: form.store_name.trim(),
+      store_id: form._store_id ?? null,
+      sector: form.sector,
+      purchase_date: form.purchase_date,
+      notes: form.notes.trim() || null,
       receipt_photo_url,
+      purchase_latitude: location?.lat ?? null,
+      purchase_longitude: location?.lng ?? null,
+      location_accuracy_m: location?.accuracy ?? null,
+      location_source: location?.source ?? null,
+      google_maps_url: location ? googleMapsUrl(location.lat, location.lng) : null,
     })
 
     if (insertErr) {
@@ -131,6 +214,7 @@ export default function AddPrice() {
       setForm(EMPTY_FORM)
       setPhoto(null)
       setPreview(null)
+      setLocation(null)
       setTimeout(() => { setSuccess(false); navigate('/') }, 2000)
     }
     setLoading(false)
@@ -160,7 +244,6 @@ export default function AddPrice() {
       )}
 
       <div className="space-y-4">
-        {/* Producto */}
         <div>
           <label className="input-label">Producto <span className="text-danger-500">*</span></label>
           <input
@@ -174,7 +257,6 @@ export default function AddPrice() {
           />
         </div>
 
-        {/* Marca */}
         <div>
           <label className="input-label">Marca <span className="text-slate-400 font-normal">(opcional)</span></label>
           <input
@@ -188,7 +270,6 @@ export default function AddPrice() {
           />
         </div>
 
-        {/* Cantidad + Unidad */}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="input-label">Cantidad <span className="text-danger-500">*</span></label>
@@ -214,7 +295,6 @@ export default function AddPrice() {
           </div>
         </div>
 
-        {/* Precio */}
         <div>
           <label className="input-label">Precio total ($) <span className="text-danger-500">*</span></label>
           <input
@@ -236,7 +316,6 @@ export default function AddPrice() {
           )}
         </div>
 
-        {/* Tienda (select con datos o libre) */}
         <div>
           <label className="input-label">Tienda <span className="text-danger-500">*</span></label>
           <select onChange={handleStoreSelect} defaultValue="" className="input-field mb-2">
@@ -257,9 +336,29 @@ export default function AddPrice() {
           />
         </div>
 
-        {/* Sector */}
+        {nearbyStores.length > 0 && (
+          <div className="bg-brand-50 border border-brand-500/20 rounded-xl p-3">
+            <p className="text-xs font-semibold text-brand-700 mb-2">Tiendas cercanas según tu ubicación</p>
+            <div className="space-y-2">
+              {nearbyStores.map(store => (
+                <button
+                  key={store.id}
+                  type="button"
+                  onClick={() => applyStore(store)}
+                  className="w-full bg-white rounded-lg p-2 text-left border border-brand-100 active:scale-95 transition-transform"
+                >
+                  <p className="text-sm font-semibold text-slate-800">{store.name}</p>
+                  <p className="text-xs text-slate-400">
+                    {store.sector} · aprox. {store.distance_km.toFixed(2)} km
+                  </p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div>
-          <label className="input-label">Sector de Rancagua <span className="text-danger-500">*</span></label>
+          <label className="input-label">Sector / población de Rancagua <span className="text-danger-500">*</span></label>
           <select name="sector" value={form.sector} onChange={handleChange} className="input-field">
             <option value="" disabled>Seleccionar sector…</option>
             {SECTORES_RANCAGUA.map(s => (
@@ -268,7 +367,47 @@ export default function AddPrice() {
           </select>
         </div>
 
-        {/* Fecha */}
+        <div>
+          <label className="input-label">Ubicación exacta <span className="text-slate-400 font-normal">(opcional)</span></label>
+          <div className="card border border-slate-200">
+            {location ? (
+              <div className="space-y-2">
+                <p className="text-sm font-semibold text-slate-800">Ubicación guardada</p>
+                <p className="text-xs text-slate-500">
+                  Lat: {location.lat} · Lng: {location.lng} · precisión aprox. {location.accuracy} m
+                </p>
+                <div className="flex gap-2">
+                  <a
+                    href={googleMapsUrl(location.lat, location.lng)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn-secondary flex-1 text-center text-sm py-2"
+                  >
+                    Ver en Google Maps
+                  </a>
+                  <button type="button" onClick={clearLocation} className="btn-danger text-sm py-2">
+                    Quitar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-sm text-slate-600">
+                  Usa esta opción solo si estás en el lugar de compra. El navegador pedirá permiso para acceder a tu ubicación.
+                </p>
+                <button
+                  type="button"
+                  onClick={captureLocation}
+                  disabled={locationLoading}
+                  className="btn-secondary w-full text-sm py-2"
+                >
+                  {locationLoading ? 'Obteniendo ubicación…' : 'Usar mi ubicación actual'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
         <div>
           <label className="input-label">Fecha de compra <span className="text-danger-500">*</span></label>
           <input
@@ -281,7 +420,6 @@ export default function AddPrice() {
           />
         </div>
 
-        {/* Notas */}
         <div>
           <label className="input-label">Notas <span className="text-slate-400 font-normal">(opcional)</span></label>
           <textarea
@@ -295,7 +433,6 @@ export default function AddPrice() {
           />
         </div>
 
-        {/* Foto de boleta */}
         <div>
           <label className="input-label">Foto de boleta <span className="text-slate-400 font-normal">(opcional)</span></label>
           <div
@@ -324,6 +461,7 @@ export default function AddPrice() {
           />
           {preview && (
             <button
+              type="button"
               onClick={() => { setPhoto(null); setPreview(null) }}
               className="text-xs text-danger-500 mt-1 underline"
             >
