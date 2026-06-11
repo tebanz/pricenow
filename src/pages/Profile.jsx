@@ -54,6 +54,15 @@ function statusBadge(status) {
   return map[status] || null
 }
 
+function transactionLabel(reason) {
+  const map = {
+    price_entry_approved: 'Precio aprobado',
+    coupon_redeemed: 'Cupón canjeado',
+    manual_adjustment: 'Ajuste manual',
+  }
+  return map[reason] || reason
+}
+
 function calculateStreak(entries) {
   const activeDays = new Set(entries.map(entry => dateKey(entry.created_at)).filter(Boolean))
   let streak = 0
@@ -105,6 +114,9 @@ function MissionCard({ title, description, value, max, reward }) {
 export default function Profile() {
   const { user, profile } = useAuth()
   const [entries, setEntries] = useState([])
+  const [wallet, setWallet] = useState(null)
+  const [transactions, setTransactions] = useState([])
+  const [redemptions, setRedemptions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -113,33 +125,55 @@ export default function Profile() {
       setLoading(true)
       setError(null)
 
-      const { data, error: fetchError } = await supabase
-        .from('price_entries')
-        .select(`
-          id,
-          product_name,
-          store_name,
-          price,
-          unit_price,
-          unit,
-          validation_status,
-          receipt_photo_url,
-          purchase_latitude,
-          purchase_longitude,
-          purchase_date,
-          created_at
-        `)
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(500)
+      const [entriesResult, walletResult, transactionsResult, redemptionsResult] = await Promise.all([
+        supabase
+          .from('price_entries')
+          .select(`
+            id,
+            product_name,
+            store_name,
+            price,
+            unit_price,
+            unit,
+            validation_status,
+            receipt_photo_url,
+            purchase_latitude,
+            purchase_longitude,
+            purchase_date,
+            created_at
+          `)
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(500),
+        supabase
+          .from('user_points')
+          .select('*')
+          .eq('user_id', user.id)
+          .maybeSingle(),
+        supabase
+          .from('point_transactions')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(20),
+        supabase
+          .from('coupon_redemptions')
+          .select('*, coupons(title, discount_label, business_partners(name))')
+          .eq('user_id', user.id)
+          .order('redeemed_at', { ascending: false })
+          .limit(6),
+      ])
 
-      if (fetchError) {
-        setError(fetchError.message)
+      if (entriesResult.error) {
+        setError(entriesResult.error.message)
         setEntries([])
       } else {
-        setEntries(data || [])
+        setEntries(entriesResult.data || [])
       }
 
+      setWallet(walletResult.data || { current_points: 0, lifetime_points: 0 })
+      setTransactions(transactionsResult.data || [])
+      setRedemptions(redemptionsResult.data || [])
       setLoading(false)
     }
 
@@ -161,13 +195,7 @@ export default function Profile() {
 
     const withLocation = approved.filter(entry => entry.purchase_latitude != null && entry.purchase_longitude != null).length
     const withReceipt = approved.filter(entry => !!entry.receipt_photo_url).length
-
-    const basePoints = approved.length * 10
-    const locationPoints = withLocation * 5
-    const receiptPoints = withReceipt * 5
     const streak = calculateStreak(entries)
-    const streakPoints = streak >= 3 ? 20 : 0
-    const points = basePoints + locationPoints + receiptPoints + streakPoints
 
     const totalValidated = approved.length + rejected.length
     const approvalRate = totalValidated > 0 ? Math.round((approved.length / totalValidated) * 100) : null
@@ -196,7 +224,6 @@ export default function Profile() {
       approvedMonth,
       withLocation,
       withReceipt,
-      points,
       approvalRate,
       streak,
       topStores,
@@ -205,9 +232,11 @@ export default function Profile() {
     }
   }, [entries])
 
-  const level = levelFromPoints(summary.points)
+  const points = wallet?.current_points || 0
+  const lifetimePoints = wallet?.lifetime_points || 0
+  const level = levelFromPoints(lifetimePoints)
   const nextLevelProgress = level.next
-    ? Math.round(((summary.points - level.min) / (level.next - level.min)) * 100)
+    ? Math.round(((lifetimePoints - level.min) / (level.next - level.min)) * 100)
     : 100
 
   if (loading) return <Spinner />
@@ -217,7 +246,7 @@ export default function Profile() {
       <div>
         <h2 className="text-xl font-bold text-slate-900">Mi perfil</h2>
         <p className="text-sm text-slate-500 mt-0.5">
-          Revisa tus aportes, puntos y metas de participación.
+          Revisa tus aportes, puntos reales y metas de participación.
         </p>
       </div>
 
@@ -243,18 +272,17 @@ export default function Profile() {
         <div className="mt-5">
           <div className="flex items-end justify-between mb-2">
             <div>
-              <p className="text-xs text-slate-500">Puntos PriceNow</p>
-              <p className="text-3xl font-black text-brand-600">{summary.points}</p>
+              <p className="text-xs text-slate-500">Puntos disponibles</p>
+              <p className="text-3xl font-black text-brand-600">{points}</p>
             </div>
-            {level.next ? (
-              <p className="text-xs text-slate-500">Faltan {level.next - summary.points} pts</p>
-            ) : (
-              <p className="text-xs text-slate-500">Nivel máximo actual</p>
-            )}
+            <div className="text-right">
+              <p className="text-xs text-slate-500">Históricos</p>
+              <p className="font-black text-slate-800">{lifetimePoints}</p>
+            </div>
           </div>
           <ProgressBar value={nextLevelProgress} max={100} />
           <p className="text-[11px] text-slate-500 mt-2">
-            Fórmula actual: +10 por precio aprobado, +5 con ubicación, +5 con foto. Se puede ajustar cuando actives cupones reales.
+            Los puntos ahora se guardan en Supabase. Se suman al aprobar reportes y se descuentan al canjear beneficios.
           </p>
         </div>
       </section>
@@ -278,7 +306,7 @@ export default function Profile() {
         <div className="flex items-center justify-between mb-4">
           <div>
             <h3 className="font-bold text-slate-900">Metas activas</h3>
-            <p className="text-xs text-slate-500">Las recompensas reales se pueden conectar a cupones después.</p>
+            <p className="text-xs text-slate-500">Los puntos se entregan cuando el admin aprueba los reportes.</p>
           </div>
         </div>
         <div className="space-y-3">
@@ -287,23 +315,53 @@ export default function Profile() {
             description="Ingresa al menos 1 precio hoy."
             value={summary.sentToday}
             max={1}
-            reward="+10 pts cuando sea aprobado"
+            reward="Puntos cuando sea aprobado"
           />
           <MissionCard
             title="Meta semanal"
             description="Consigue 5 precios aprobados esta semana."
             value={summary.approvedWeek}
             max={5}
-            reward="Bono semanal de participación"
+            reward="Avance de nivel y más puntos disponibles"
           />
           <MissionCard
             title="Meta mensual"
             description="Consigue 20 precios aprobados este mes."
             value={summary.approvedMonth}
             max={20}
-            reward="Acceso a cupón destacado cuando esté disponible"
+            reward="Preparado para beneficios destacados"
           />
         </div>
+      </section>
+
+      <section className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-bold text-slate-900">Beneficios y cupones</h3>
+          <Link to="/benefits" className="text-xs font-semibold text-brand-500">Ver beneficios</Link>
+        </div>
+        {redemptions.length === 0 ? (
+          <div className="rounded-2xl bg-brand-50 border border-brand-100 p-4">
+            <p className="font-bold text-brand-700 text-sm">Canjea puntos</p>
+            <p className="text-xs text-brand-700/70 mt-1">
+              Cuando existan negocios asociados, podrás usar tus puntos para obtener descuentos.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {redemptions.map(redemption => (
+              <div key={redemption.id} className="rounded-2xl bg-slate-50 border border-slate-100 p-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-bold text-slate-800 text-sm truncate">{redemption.coupons?.title || 'Beneficio'}</p>
+                  <p className="text-xs text-slate-400 truncate">{redemption.coupons?.business_partners?.name || 'PriceNow'}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="font-black text-brand-600">{redemption.code}</p>
+                  <p className="text-[11px] text-slate-400">-{redemption.points_spent} pts</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="grid grid-cols-2 gap-3">
@@ -329,23 +387,24 @@ export default function Profile() {
         </div>
       </section>
 
-      <section className="card">
-        <h3 className="font-bold text-slate-900 mb-3">Beneficios</h3>
-        <div className="space-y-2">
-          <div className="rounded-2xl bg-brand-50 border border-brand-100 p-4">
-            <p className="font-bold text-brand-700 text-sm">Cupones por puntos</p>
-            <p className="text-xs text-brand-700/70 mt-1">
-              Próximamente podrás canjear puntos por descuentos en negocios asociados.
-            </p>
+      {transactions.length > 0 && (
+        <section className="card">
+          <h3 className="font-bold text-slate-900 mb-3">Movimientos de puntos</h3>
+          <div className="space-y-2">
+            {transactions.slice(0, 6).map(transaction => (
+              <div key={transaction.id} className="flex items-center justify-between gap-3 text-sm">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-700 truncate">{transactionLabel(transaction.reason)}</p>
+                  <p className="text-xs text-slate-400 truncate">{new Date(transaction.created_at).toLocaleDateString('es-CL')}</p>
+                </div>
+                <span className={`font-black ${transaction.points >= 0 ? 'text-success-600' : 'text-danger-600'}`}>
+                  {transaction.points > 0 ? '+' : ''}{transaction.points}
+                </span>
+              </div>
+            ))}
           </div>
-          <div className="rounded-2xl bg-slate-50 border border-slate-100 p-4">
-            <p className="font-bold text-slate-800 text-sm">Pase PriceNow</p>
-            <p className="text-xs text-slate-500 mt-1">
-              Base preparada para niveles, metas semanales, recompensas y productos destacados.
-            </p>
-          </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {(summary.topStores.length > 0 || summary.topProducts.length > 0) && (
         <section className="card">

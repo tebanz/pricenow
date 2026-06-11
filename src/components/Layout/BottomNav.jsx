@@ -40,6 +40,15 @@ const navItems = [
     ),
   },
   {
+    to: '/benefits',
+    label: 'Beneficios',
+    icon: (active) => (
+      <svg className={`w-5 h-5 ${active ? 'fill-brand-500' : 'fill-slate-400'}`} viewBox="0 0 24 24">
+        <path d="M20 6h-2.18c.11-.31.18-.65.18-1 0-1.66-1.34-3-3-3-1.04 0-1.95.53-2.49 1.33L12 4l-.51-.67C10.95 2.53 10.04 2 9 2 7.34 2 6 3.34 6 5c0 .35.07.69.18 1H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zM9 4c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm6 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zM4 19v-5h7v5H4zm0-7V8h7v4H4zm16 7h-7v-5h7v5zm0-7h-7V8h7v4z"/>
+      </svg>
+    ),
+  },
+  {
     to: '/profile',
     label: 'Perfil',
     icon: (active) => (
@@ -55,14 +64,14 @@ export default function BottomNav() {
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-40 pb-safe">
-      <div className="flex justify-around items-center max-w-lg mx-auto">
+      <div className="flex justify-around items-center max-w-lg mx-auto overflow-x-auto">
         {navItems.map(({ to, label, icon, highlight }) => (
           <NavLink
             key={to}
             to={to}
             end={to === '/'}
             className={({ isActive }) =>
-              `flex flex-col items-center py-2 px-2 min-w-0 flex-1 transition-colors ${
+              `flex flex-col items-center py-2 px-2 min-w-[58px] flex-1 transition-colors ${
                 isActive ? 'text-brand-500' : 'text-slate-400'
               }`
             }
@@ -92,7 +101,7 @@ export default function BottomNav() {
           <NavLink
             to="/validate"
             className={({ isActive }) =>
-              `flex flex-col items-center py-2 px-2 min-w-0 flex-1 transition-colors ${
+              `flex flex-col items-center py-2 px-2 min-w-[58px] flex-1 transition-colors ${
                 isActive ? 'text-warning-600' : 'text-slate-400'
               }`
             }
