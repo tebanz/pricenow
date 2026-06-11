@@ -366,7 +366,7 @@ export default function Profile() {
       <div>
         <h2 className="text-xl font-bold text-slate-900">Mi perfil</h2>
         <p className="text-sm text-slate-500 mt-0.5">
-          Gestiona tus puntos, beneficios, preferencias y actividad de PriceNow.
+          Revisa tus puntos, beneficios y preferencias sin duplicar accesos en la pantalla.
         </p>
       </div>
 
@@ -405,49 +405,6 @@ export default function Profile() {
             Participa con precios aprobados para subir de nivel y canjear beneficios.
           </p>
         </div>
-      </section>
-
-      <section className="grid grid-cols-2 gap-3">
-        <button
-          type="button"
-          onClick={() => changeTab('beneficios')}
-          className="card text-left active:scale-[0.99] transition-transform"
-        >
-          <p className="text-lg mb-1">🎁</p>
-          <p className="font-bold text-slate-900 text-sm">Beneficios</p>
-          <p className="text-xs text-slate-500 mt-0.5">Cupones y canjes</p>
-        </button>
-        <button
-          type="button"
-          onClick={() => changeTab('preferencias')}
-          className="card text-left active:scale-[0.99] transition-transform"
-        >
-          <p className="text-lg mb-1">📍</p>
-          <p className="font-bold text-slate-900 text-sm">Preferencias</p>
-          <p className="text-xs text-slate-500 mt-0.5">Zona y ubicación</p>
-        </button>
-        <Link to="/add" className="card text-left active:scale-[0.99] transition-transform">
-          <p className="text-lg mb-1">➕</p>
-          <p className="font-bold text-slate-900 text-sm">Ingresar precio</p>
-          <p className="text-xs text-slate-500 mt-0.5">Nuevo aporte</p>
-        </Link>
-        {isValidator ? (
-          <Link to="/validate" className="card text-left border-warning-100 bg-warning-50/40 active:scale-[0.99] transition-transform">
-            <p className="text-lg mb-1">🛡️</p>
-            <p className="font-bold text-slate-900 text-sm">Panel admin</p>
-            <p className="text-xs text-slate-500 mt-0.5">Validar reportes</p>
-          </Link>
-        ) : (
-          <button
-            type="button"
-            onClick={() => changeTab('configuracion')}
-            className="card text-left active:scale-[0.99] transition-transform"
-          >
-            <p className="text-lg mb-1">⚙️</p>
-            <p className="font-bold text-slate-900 text-sm">Configuración</p>
-            <p className="text-xs text-slate-500 mt-0.5">Personalización</p>
-          </button>
-        )}
       </section>
 
       <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
@@ -617,9 +574,9 @@ export default function Profile() {
           )}
 
           <section className="card">
-            <div className="flex items-center justify-between mb-3">
+            <div className="mb-3">
               <h3 className="font-bold text-slate-900">Últimos aportes</h3>
-              <Link to="/add" className="text-xs font-semibold text-brand-500">Ingresar precio</Link>
+              <p className="text-xs text-slate-500 mt-0.5">Historial reciente de precios enviados.</p>
             </div>
             {summary.recent.length === 0 ? (
               <p className="text-sm text-slate-500">Todavía no tienes precios ingresados.</p>
@@ -652,39 +609,6 @@ export default function Profile() {
 
       {activeTab === 'preferencias' && (
         <div className="space-y-4">
-          <section className="card">
-            <h3 className="font-bold text-slate-900 mb-1">Editar perfil</h3>
-            <p className="text-xs text-slate-500 mb-4">Ajusta cómo se muestra tu cuenta dentro de PriceNow.</p>
-            <form onSubmit={saveProfile} className="space-y-3">
-              <div>
-                <label className="input-label">Nombre público</label>
-                <input
-                  className="input-field"
-                  value={profileForm.full_name}
-                  onChange={e => setProfileForm(prev => ({ ...prev, full_name: e.target.value }))}
-                  placeholder="Tu nombre o apodo"
-                />
-              </div>
-              <div>
-                <label className="input-label">Usuario</label>
-                <input
-                  className="input-field"
-                  value={profileForm.username}
-                  onChange={e => setProfileForm(prev => ({ ...prev, username: e.target.value }))}
-                  placeholder="usuario"
-                />
-              </div>
-              {profileMessage && (
-                <p className={`text-sm ${profileMessage.type === 'error' ? 'text-danger-600' : 'text-success-600'}`}>
-                  {profileMessage.text}
-                </p>
-              )}
-              <button type="submit" disabled={profileSaving} className="btn-primary w-full">
-                {profileSaving ? 'Guardando...' : 'Guardar perfil'}
-              </button>
-            </form>
-          </section>
-
           <section className="card">
             <h3 className="font-bold text-slate-900 mb-1">Ubicaciones y zona preferida</h3>
             <p className="text-xs text-slate-500 mb-4">Sirve para ordenar precios cercanos y reducir información innecesaria.</p>
@@ -725,6 +649,48 @@ export default function Profile() {
 
       {activeTab === 'configuracion' && (
         <div className="space-y-4">
+          <section className="card">
+            <h3 className="font-bold text-slate-900 mb-1">Editar perfil</h3>
+            <p className="text-xs text-slate-500 mb-4">Ajusta cómo se muestra tu cuenta dentro de PriceNow.</p>
+            <form onSubmit={saveProfile} className="space-y-3">
+              <div>
+                <label className="input-label">Nombre público</label>
+                <input
+                  className="input-field"
+                  value={profileForm.full_name}
+                  onChange={e => setProfileForm(prev => ({ ...prev, full_name: e.target.value }))}
+                  placeholder="Tu nombre o apodo"
+                />
+              </div>
+              <div>
+                <label className="input-label">Usuario</label>
+                <input
+                  className="input-field"
+                  value={profileForm.username}
+                  onChange={e => setProfileForm(prev => ({ ...prev, username: e.target.value }))}
+                  placeholder="usuario"
+                />
+              </div>
+              {profileMessage && (
+                <p className={`text-sm ${profileMessage.type === 'error' ? 'text-danger-600' : 'text-success-600'}`}>
+                  {profileMessage.text}
+                </p>
+              )}
+              <button type="submit" disabled={profileSaving} className="btn-primary w-full">
+                {profileSaving ? 'Guardando...' : 'Guardar perfil'}
+              </button>
+            </form>
+          </section>
+
+
+          {isValidator && (
+            <section className="card border-warning-100 bg-warning-50/40">
+              <h3 className="font-bold text-slate-900 mb-1">Herramientas de administración</h3>
+              <p className="text-xs text-slate-500 mb-3">Acceso rápido para revisar y validar aportes de la comunidad.</p>
+              <Link to="/validate" className="btn-secondary w-full">Ir al panel de validación</Link>
+            </section>
+          )}
+
           <section className="card">
             <h3 className="font-bold text-slate-900 mb-1">Personalización</h3>
             <p className="text-xs text-slate-500 mb-4">Preferencias guardadas localmente en este dispositivo.</p>
