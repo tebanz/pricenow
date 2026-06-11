@@ -8,6 +8,9 @@ import AddPrice from './pages/AddPrice'
 import Ranking from './pages/Ranking'
 import Validate from './pages/Validate'
 import Profile from './pages/Profile'
+import DataQuality from './pages/DataQuality'
+import BusinessPartners from './pages/BusinessPartners'
+import FavoritesAlerts from './pages/FavoritesAlerts'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -43,7 +46,18 @@ export default function App() {
         <Route path="ranking" element={<Ranking />} />
         <Route path="report" element={<Navigate to="/ranking?tab=reportes" replace />} />
         <Route path="benefits" element={<Navigate to="/profile?tab=beneficios" replace />} />
+        <Route path="favorites" element={<FavoritesAlerts />} />
         <Route path="profile" element={<Profile />} />
+        <Route path="quality" element={
+          <ValidatorRoute>
+            <DataQuality />
+          </ValidatorRoute>
+        } />
+        <Route path="partners" element={
+          <ValidatorRoute>
+            <BusinessPartners />
+          </ValidatorRoute>
+        } />
         <Route path="validate" element={
           <ValidatorRoute>
             <Validate />

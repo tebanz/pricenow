@@ -2,613 +2,219 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import { formatCLP, formatUnitPrice } from '../utils/priceCalc'
-import Spinner from '../components/UI/Spinner'
 
-const MAP_RADIUS_KM = 5
-
-function distanceKm(a, b) {
-  if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return null
-  const R = 6371
-  const dLat = (Number(b.lat) - Number(a.lat)) * Math.PI / 180
-  const dLng = (Number(b.lng) - Number(a.lng)) * Math.PI / 180
-  const lat1 = Number(a.lat) * Math.PI / 180
-  const lat2 = Number(b.lat) * Math.PI / 180
-  const sinLat = Math.sin(dLat / 2)
-  const sinLng = Math.sin(dLng / 2)
-  const c = 2 * Math.atan2(
-    Math.sqrt(sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng),
-    Math.sqrt(1 - (sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng))
-  )
-  return R * c
+function money(value) {
+  return Number(value || 0).toLocaleString('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 })
 }
 
-function formatDistanceKm(km) {
-  if (km == null || Number.isNaN(Number(km))) return 'distancia no disponible'
-  const meters = Math.round(Number(km) * 1000)
-  if (meters < 1000) return `${meters} m`
-  if (meters < 10000) return `${Number(km).toFixed(1).replace('.0', '')} km`
-  return `${Math.round(Number(km))} km`
+function distanceMeters(a, b) {
+  if (!a?.lat || !a?.lng || !b?.lat || !b?.lng) return null
+  const R = 6371000
+  const toRad = deg => (deg * Math.PI) / 180
+  const dLat = toRad(b.lat - a.lat)
+  const dLng = toRad(b.lng - a.lng)
+  const lat1 = toRad(a.lat)
+  const lat2 = toRad(b.lat)
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(h))
 }
 
-function normalizeText(value = '') {
-  return value
-    .toString()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
+function formatDistance(meters) {
+  if (meters == null) return 'Sin distancia'
+  if (meters < 1000) return `${Math.round(meters)} m`
+  return `${(meters / 1000).toFixed(1)} km`
 }
 
-function comparableUnit(unit) {
-  if (unit === 'g') return 'kg'
-  if (unit === 'ml') return 'litro'
-  return unit || 'unidad'
-}
-
-function getLinkedProduct(row) {
-  return Array.isArray(row.products) ? row.products[0] : row.products
-}
-
-function getProductName(row) {
-  const product = getLinkedProduct(row)
-  return product?.name || row.product_name || 'Producto'
-}
-
-function getStandardUnit(row) {
-  const product = getLinkedProduct(row)
-  return comparableUnit(product?.default_unit || row.unit || 'unidad')
-}
-
-function markerIcon(place) {
-  const text = normalizeText(`${place.name} ${place.type || ''} ${place.chain || ''}`)
-  if (text.includes('panader')) return '🥖'
-  if (text.includes('carnicer')) return '🥩'
-  if (text.includes('verduler') || text.includes('fruta')) return '🥬'
-  if (text.includes('super') || text.includes('lider') || text.includes('jumbo') || text.includes('santa isabel') || text.includes('unimarc') || text.includes('acuenta')) return '🛒'
-  return '🏪'
-}
-
-function openMapUrl(lat, lng) {
-  return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=17/${lat}/${lng}`
-}
-
-function markerPosition(origin, place) {
-  if (!origin || place.lat == null || place.lng == null) return { left: '50%', top: '50%' }
-
-  const latKm = (Number(place.lat) - Number(origin.lat)) * 111
-  const lngKm = (Number(place.lng) - Number(origin.lng)) * 111 * Math.cos(Number(origin.lat) * Math.PI / 180)
-
-  const left = Math.max(6, Math.min(94, 50 + (lngKm / MAP_RADIUS_KM) * 42))
-  const top = Math.max(6, Math.min(94, 50 - (latKm / MAP_RADIUS_KM) * 42))
-
-  return { left: `${left}%`, top: `${top}%` }
-}
-
-const DUPLICATE_RADIUS_KM = 0.35
-
-function canonicalBusinessName(name = '', chain = '') {
-  const text = normalizeText(`${chain} ${name}`)
-  const knownChains = [
-    'santa isabel',
-    'lider',
-    'jumbo',
-    'unimarc',
-    'acuenta',
-    'mayorista 10',
-    'tottus',
-    'ok market',
-    'oxxo',
-    'ekono',
-  ]
-
-  const chainMatch = knownChains.find(chainName => text.includes(chainName))
-  if (chainMatch) return chainMatch
-
-  return text
-    .replace(/\b(supermercado|supermercados|minimarket|mini market|market|almacen|almacenes|tienda|local|sucursal|rancagua)\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || text
-}
-
-function isDuplicatePlace(a, b) {
-  if (!a || !b) return false
-  if (a.lat == null || a.lng == null || b.lat == null || b.lng == null) return false
-
-  const distanceBetweenPoints = distanceKm(
-    { lat: a.lat, lng: a.lng },
-    { lat: b.lat, lng: b.lng }
-  )
-
-  if (distanceBetweenPoints == null || distanceBetweenPoints > DUPLICATE_RADIUS_KM) return false
-
-  const aName = canonicalBusinessName(a.name, a.chain)
-  const bName = canonicalBusinessName(b.name, b.chain)
-
-  if (!aName || !bName) return false
-  if (aName === bName) return true
-
-  const minLength = Math.min(aName.length, bName.length)
-  if (minLength >= 5 && (aName.includes(bName) || bName.includes(aName))) return true
-
-  return false
-}
-
-function chooseDisplayName(currentName, nextName) {
-  const current = currentName || ''
-  const next = nextName || ''
-  if (!current) return next
-  if (!next) return current
-  if (normalizeText(next).includes(normalizeText(current)) && next.length > current.length) return next
-  if (next.length > current.length + 8) return next
-  return current
-}
-
-function mergePlace(existing, candidate, location) {
-  const candidateDistance = distanceKm(location, { lat: candidate.lat, lng: candidate.lng })
-  const existingDistance = distanceKm(location, { lat: existing.lat, lng: existing.lng })
-
-  const useCandidatePosition = candidateDistance != null && (
-    existingDistance == null || candidateDistance < existingDistance
-  )
-
-  const mergedPrices = [...(existing.prices || []), ...(candidate.prices || [])]
-  const priceIds = new Set()
-  const uniquePrices = mergedPrices.filter(price => {
-    const key = price.id || `${price.product_name}-${price.unit_price}-${price.purchase_date}`
-    if (priceIds.has(key)) return false
-    priceIds.add(key)
-    return true
-  })
-
-  return {
-    ...existing,
-    name: chooseDisplayName(existing.name, candidate.name),
-    chain: existing.chain || candidate.chain || '',
-    type: existing.type === 'Tienda conocida' ? existing.type : (candidate.type || existing.type),
-    sector: existing.sector || candidate.sector || '',
-    address: existing.address || candidate.address || '',
-    lat: useCandidatePosition ? candidate.lat : existing.lat,
-    lng: useCandidatePosition ? candidate.lng : existing.lng,
-    distance_km: useCandidatePosition ? candidateDistance : existingDistance,
-    source: existing.source === candidate.source ? existing.source : 'combined',
-    prices: uniquePrices,
-  }
-}
-
-function addOrMergePlace(places, candidate, location) {
-  const index = places.findIndex(place => isDuplicatePlace(place, candidate))
-  if (index >= 0) {
-    places[index] = mergePlace(places[index], candidate, location)
-  } else {
-    places.push(candidate)
-  }
-}
-
-function buildNearbyPlaces(location, stores, approvedEntries) {
-  if (!location) return []
-
-  const places = []
-
-  stores.forEach(store => {
-    if (store.latitude == null || store.longitude == null) return
-    const lat = Number(store.latitude)
-    const lng = Number(store.longitude)
-    const km = distanceKm(location, { lat, lng })
-    if (km == null || km > 20) return
-
-    addOrMergePlace(places, {
-      id: `store-${store.id || `${normalizeText(store.name)}-${lat}-${lng}`}`,
-      name: store.name,
-      chain: store.chain || '',
-      type: store.chain || 'Tienda conocida',
-      sector: store.sector || '',
-      address: store.address || '',
-      lat,
-      lng,
-      distance_km: km,
-      source: 'store',
-      prices: [],
-    }, location)
-  })
-
-  approvedEntries.forEach(entry => {
-    if (entry.purchase_latitude == null || entry.purchase_longitude == null || !entry.store_name) return
-    const lat = Number(entry.purchase_latitude)
-    const lng = Number(entry.purchase_longitude)
-    const km = distanceKm(location, { lat, lng })
-    if (km == null || km > 20) return
-
-    const unitPrice = Number(entry.unit_price)
-    const prices = Number.isFinite(unitPrice) && unitPrice > 0
-      ? [{
-          id: entry.id,
-          product_name: getProductName(entry),
-          unit: getStandardUnit(entry),
-          unit_price: unitPrice,
-          price: Number(entry.price),
-          purchase_date: entry.purchase_date,
-        }]
-      : []
-
-    addOrMergePlace(places, {
-      id: `report-${entry.id}`,
-      name: entry.store_name,
-      chain: '',
-      type: 'Reportado en PriceNow',
-      sector: entry.sector || '',
-      address: entry.sector || '',
-      lat,
-      lng,
-      distance_km: km,
-      source: 'report',
-      prices,
-    }, location)
-  })
-
-  return places
-    .map(place => ({
-      ...place,
-      distance_km: distanceKm(location, { lat: place.lat, lng: place.lng }),
-      best_price: place.prices.length
-        ? place.prices.slice().sort((a, b) => a.unit_price - b.unit_price)[0]
-        : null,
-    }))
-    .sort((a, b) => a.distance_km - b.distance_km)
-    .slice(0, 12)
+function Card({ children, className = '' }) {
+  return <section className={`rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm ${className}`}>{children}</section>
 }
 
 export default function Home() {
-  const { user, profile } = useAuth()
-  const [stats, setStats] = useState(null)
-  const [recent, setRecent] = useState([])
+  const { user, profile, isValidator } = useAuth()
+  const [entries, setEntries] = useState([])
   const [stores, setStores] = useState([])
-  const [approvedEntries, setApprovedEntries] = useState([])
+  const [wallet, setWallet] = useState(null)
+  const [alerts, setAlerts] = useState([])
   const [loading, setLoading] = useState(true)
   const [location, setLocation] = useState(null)
-  const [locationStatus, setLocationStatus] = useState('idle')
-  const [locationError, setLocationError] = useState(null)
+  const [locationMessage, setLocationMessage] = useState('')
 
-  useEffect(() => {
-    async function load() {
-      const [statsRes, recentRes, storesRes, entriesRes] = await Promise.all([
-        supabase
-          .from('price_entries')
-          .select('id, validation_status', { count: 'exact' })
-          .eq('user_id', user.id),
-        supabase
-          .from('price_entries')
-          .select('id, product_name, brand, price, unit, store_name, purchase_date, validation_status')
-          .eq('user_id', user.id)
-          .order('created_at', { ascending: false })
-          .limit(5),
-        supabase
-          .from('stores')
-          .select('id, name, chain, sector, address, latitude, longitude, is_active')
-          .eq('is_active', true)
-          .limit(500),
-        supabase
-          .from('price_entries')
-          .select(`
-            id,
-            product_id,
-            product_name,
-            brand,
-            unit,
-            price,
-            unit_price,
-            store_name,
-            sector,
-            purchase_date,
-            purchase_latitude,
-            purchase_longitude,
-            products(id, name, category, default_unit)
-          `)
-          .eq('validation_status', 'approved')
-          .not('purchase_latitude', 'is', null)
-          .not('purchase_longitude', 'is', null)
-          .order('purchase_date', { ascending: false })
-          .limit(700),
-      ])
+  async function load() {
+    setLoading(true)
+    const [entriesRes, storesRes, walletRes, alertsRes] = await Promise.all([
+      supabase
+        .from('price_entries')
+        .select('id, product_name, store_name, sector, unit_price, price, created_at, purchase_date, store_id, product_id, stores(id, name, sector, latitude, longitude), products(id, name, default_unit, category)')
+        .eq('validation_status', 'approved')
+        .order('created_at', { ascending: false })
+        .limit(250),
+      supabase.from('stores').select('id, name, sector, address, latitude, longitude, chain').eq('is_active', true).limit(250),
+      supabase.from('user_points').select('*').eq('user_id', user?.id).maybeSingle(),
+      supabase.from('price_alerts').select('*, products(name, default_unit)').eq('user_id', user?.id).eq('is_active', true).limit(20),
+    ])
+    setEntries(entriesRes.data || [])
+    setStores(storesRes.data || [])
+    setWallet(walletRes.data || null)
+    setAlerts(alertsRes.data || [])
+    setLoading(false)
+  }
 
-      if (statsRes.data) {
-        const all = statsRes.data
-        const approved = all.filter(r => r.validation_status === 'approved').length
-        const pending = all.filter(r => r.validation_status === 'pending').length
-        setStats({ total: all.length, approved, pending })
-      }
+  useEffect(() => { load() }, [user?.id])
 
-      if (recentRes.data) setRecent(recentRes.data)
-      if (storesRes.data) setStores(storesRes.data)
-      if (entriesRes.data) setApprovedEntries(entriesRes.data)
-      setLoading(false)
-    }
-
-    load()
-  }, [user.id])
-
-  useEffect(() => {
-    const alreadyAsked = sessionStorage.getItem('pricenow_home_location_prompt')
-    if (!alreadyAsked) {
-      sessionStorage.setItem('pricenow_home_location_prompt', '1')
-      requestLocation(true)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const nearbyPlaces = useMemo(
-    () => buildNearbyPlaces(location, stores, approvedEntries),
-    [location, stores, approvedEntries]
-  )
-
-  const nearbyHighlights = nearbyPlaces
-    .flatMap(place => (place.prices || []).map(price => ({ ...price, place })))
-    .sort((a, b) => a.unit_price - b.unit_price)
-    .slice(0, 4)
-
-  function requestLocation(silent = false) {
-    setLocationError(null)
-
+  function requestLocation() {
     if (!navigator.geolocation) {
-      setLocationStatus('error')
-      setLocationError('Tu navegador no permite obtener ubicación.')
+      setLocationMessage('Tu navegador no permite ubicación.')
       return
     }
-
-    setLocationStatus('loading')
+    setLocationMessage('Solicitando ubicación...')
     navigator.geolocation.getCurrentPosition(
       position => {
-        setLocation({
-          lat: Number(position.coords.latitude.toFixed(7)),
-          lng: Number(position.coords.longitude.toFixed(7)),
-          accuracy: Math.round(position.coords.accuracy || 0),
-        })
-        setLocationStatus('ready')
+        setLocation({ lat: position.coords.latitude, lng: position.coords.longitude })
+        setLocationMessage('Ubicación activada para mostrar datos cercanos.')
       },
-      () => {
-        setLocationStatus('denied')
-        if (!silent) setLocationError('No se pudo obtener la ubicación. Puedes permitirla desde el navegador o usar la app sin mapa cercano.')
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 12000,
-        maximumAge: 60000,
-      }
+      () => setLocationMessage('No se pudo obtener ubicación. Puedes usar la app igual.'),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
     )
   }
 
-  const statusBadge = (status) => {
-    const map = {
-      pending: <span className="badge-pending">Pendiente</span>,
-      approved: <span className="badge-approved">Aprobado</span>,
-      rejected: <span className="badge-rejected">Rechazado</span>,
-    }
-    return map[status] ?? null
-  }
+  const nearbyStores = useMemo(() => {
+    const withDistance = stores
+      .map(store => ({
+        ...store,
+        distance: distanceMeters(location, { lat: Number(store.latitude), lng: Number(store.longitude) }),
+      }))
+      .filter(store => store.distance != null)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 5)
+    return withDistance
+  }, [stores, location])
 
-  if (loading) return <Spinner />
+  const bestPrices = useMemo(() => {
+    const latestByProduct = new Map()
+    for (const entry of entries) {
+      const key = entry.product_id || entry.product_name
+      const current = latestByProduct.get(key)
+      const unitPrice = Number(entry.unit_price || entry.price || 0)
+      if (!current || unitPrice < Number(current.unit_price || current.price || 0)) latestByProduct.set(key, entry)
+    }
+    return [...latestByProduct.values()].slice(0, 5)
+  }, [entries])
+
+  const opportunities = useMemo(() => {
+    return alerts.map(alert => {
+      const match = entries.find(entry => {
+        if (alert.product_id && entry.product_id !== alert.product_id) return false
+        if (alert.sector && entry.sector !== alert.sector) return false
+        return Number(entry.unit_price || 0) <= Number(alert.target_unit_price)
+      })
+      return { alert, match }
+    }).filter(item => item.match).slice(0, 3)
+  }, [alerts, entries])
+
+  const approvedToday = entries.filter(entry => new Date(entry.created_at).toDateString() === new Date().toDateString()).length
+  const firstName = profile?.full_name?.split(' ')[0] || profile?.username || user?.email?.split('@')[0] || 'usuario'
 
   return (
-    <div className="px-4 py-5 max-w-lg mx-auto space-y-5">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900">
-          Hola, {profile?.username} 👋
-        </h2>
-        <p className="text-sm text-slate-500 mt-0.5">
-          Tus aportes ayudan a comparar precios reales en Rancagua.
-        </p>
-      </div>
-
-      <section className="card overflow-hidden">
-        <div className="flex items-start justify-between gap-3 mb-3">
+    <div className="space-y-5 pb-28">
+      <section className="overflow-hidden rounded-[2rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 p-5 text-white shadow-xl">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="font-bold text-slate-900">Mapa cerca de ti</h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Tiendas y precios aprobados con ubicación exacta.
-            </p>
+            <p className="text-sm text-blue-100">Hola, {firstName}</p>
+            <h1 className="mt-1 text-2xl font-black leading-tight">Precios reales cerca de ti</h1>
+            <p className="mt-2 text-sm text-blue-50">Compara, reporta y gana beneficios colaborando con la comunidad.</p>
           </div>
-          <button
-            type="button"
-            onClick={() => requestLocation(false)}
-            disabled={locationStatus === 'loading'}
-            className="text-xs bg-brand-500 text-white font-semibold px-3 py-2 rounded-xl active:scale-95 transition-transform disabled:opacity-60"
-          >
-            {locationStatus === 'loading' ? 'Ubicando…' : location ? 'Actualizar' : 'Permitir ubicación'}
-          </button>
+          <div className="rounded-3xl bg-white/10 p-3 text-center backdrop-blur">
+            <p className="text-xl font-black">{wallet?.balance ?? 0}</p>
+            <p className="text-[11px] text-blue-100">puntos</p>
+          </div>
         </div>
-
-        <div className="relative h-56 rounded-2xl overflow-hidden bg-gradient-to-br from-emerald-50 via-sky-50 to-slate-100 border border-slate-200">
-          <div className="absolute inset-0 opacity-50" style={{
-            backgroundImage: 'linear-gradient(to right, rgba(100,116,139,.18) 1px, transparent 1px), linear-gradient(to bottom, rgba(100,116,139,.18) 1px, transparent 1px)',
-            backgroundSize: '34px 34px',
-          }} />
-          <div className="absolute left-1/2 top-1/2 w-36 h-36 -translate-x-1/2 -translate-y-1/2 rounded-full border border-brand-300/50" />
-          <div className="absolute left-1/2 top-1/2 w-52 h-52 -translate-x-1/2 -translate-y-1/2 rounded-full border border-brand-200/50" />
-
-          {location ? (
-            <>
-              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20">
-                <div className="w-9 h-9 rounded-full bg-brand-500 text-white flex items-center justify-center shadow-lg ring-4 ring-white font-bold">
-                  Tú
-                </div>
-              </div>
-
-              {nearbyPlaces.slice(0, 10).map(place => {
-                const pos = markerPosition(location, place)
-                return (
-                  <a
-                    key={place.id}
-                    href={openMapUrl(place.lat, place.lng)}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={`${place.name} · ${formatDistanceKm(place.distance_km)}`}
-                    className="absolute -translate-x-1/2 -translate-y-1/2 z-10 w-8 h-8 rounded-full bg-white shadow-md border border-slate-200 flex items-center justify-center text-lg active:scale-95"
-                    style={pos}
-                  >
-                    {markerIcon(place)}
-                  </a>
-                )
-              })}
-            </>
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center px-5 text-center">
-              <div>
-                <p className="text-3xl mb-2">📍</p>
-                <p className="text-sm font-semibold text-slate-700">Activa tu ubicación para ver negocios cercanos.</p>
-                <p className="text-xs text-slate-500 mt-1">La app seguirá funcionando aunque no des permiso.</p>
-              </div>
-            </div>
-          )}
+        <div className="mt-5 grid grid-cols-3 gap-2 text-center">
+          <Link to="/add" className="rounded-2xl bg-white px-3 py-3 text-xs font-black text-blue-700 shadow-sm">Reportar</Link>
+          <Link to="/ranking" className="rounded-2xl bg-white/10 px-3 py-3 text-xs font-black text-white ring-1 ring-white/20">Precios</Link>
+          <Link to="/profile?tab=beneficios" className="rounded-2xl bg-white/10 px-3 py-3 text-xs font-black text-white ring-1 ring-white/20">Beneficios</Link>
         </div>
-
-        {location && (
-          <p className="text-[11px] text-slate-400 mt-2">
-            Precisión aproximada: {location.accuracy ? `${location.accuracy} m` : 'no disponible'} · radio visual: {MAP_RADIUS_KM} km.
-          </p>
-        )}
-
-        {locationError && <p className="text-xs text-danger-600 mt-2">{locationError}</p>}
-
-        {location && nearbyPlaces.length === 0 && (
-          <p className="text-sm text-slate-500 mt-3">
-            Aún no hay negocios cercanos con coordenadas guardadas. Registra una compra con ubicación exacta y, cuando se apruebe, aparecerá aquí.
-          </p>
-        )}
-
-        {nearbyPlaces.length > 0 && (
-          <div className="mt-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <h4 className="text-sm font-semibold text-slate-700">Negocios cercanos</h4>
-              <span className="text-xs text-slate-400">{nearbyPlaces.length} encontrados</span>
-            </div>
-            {nearbyPlaces.slice(0, 4).map(place => (
-              <a
-                key={place.id}
-                href={openMapUrl(place.lat, place.lng)}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2 active:scale-[0.99] transition-transform"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="w-8 h-8 rounded-full bg-white flex items-center justify-center shadow-sm shrink-0">
-                    {markerIcon(place)}
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-slate-800 truncate">{place.name}</p>
-                    <p className="text-xs text-slate-400 truncate">{place.sector || place.address || place.type}</p>
-                  </div>
-                </div>
-                <span className="text-xs font-semibold text-brand-600 shrink-0">{formatDistanceKm(place.distance_km)}</span>
-              </a>
-            ))}
-          </div>
-        )}
-
-        {nearbyHighlights.length > 0 && (
-          <div className="mt-4 space-y-2">
-            <h4 className="text-sm font-semibold text-slate-700">Precios destacados cerca</h4>
-            {nearbyHighlights.map(item => (
-              <div key={`${item.id}-${item.place.id}`} className="rounded-xl border border-success-100 bg-success-50/40 px-3 py-2">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-slate-800 truncate">{item.product_name}</p>
-                    <p className="text-xs text-slate-500 truncate">{item.place.name} · {formatDistanceKm(item.place.distance_km)}</p>
-                  </div>
-                  <span className="text-sm font-bold text-success-600 shrink-0">
-                    {formatUnitPrice(item.unit_price, item.unit)}
-                  </span>
-                </div>
-              </div>
-            ))}
-            <p className="text-[11px] text-slate-400">
-              Estos avisos salen de reportes aprobados; no son descuentos comerciales confirmados por el negocio.
-            </p>
-          </div>
-        )}
       </section>
 
-      <div className="grid grid-cols-3 gap-3">
-        {[
-          { label: 'Total', value: stats?.total ?? 0, color: 'text-brand-500' },
-          { label: 'Aprobados', value: stats?.approved ?? 0, color: 'text-success-500' },
-          { label: 'Pendientes', value: stats?.pending ?? 0, color: 'text-warning-600' },
-        ].map(({ label, value, color }) => (
-          <div key={label} className="card text-center">
-            <p className={`text-2xl font-bold ${color}`}>{value}</p>
-            <p className="text-xs text-slate-500 mt-0.5">{label}</p>
-          </div>
-        ))}
-      </div>
-
-      <Link to="/add" className="block">
-        <div className="bg-brand-500 text-white rounded-2xl p-5 flex items-center justify-between shadow-md active:scale-98 transition-transform">
+      <Card>
+        <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="font-bold text-base">Ingresar precio</p>
-            <p className="text-white/70 text-xs mt-0.5">Comparte lo que pagaste hoy</p>
+            <h2 className="font-black text-slate-900">Tu zona</h2>
+            <p className="mt-1 text-sm text-slate-500">Activa ubicación para priorizar negocios y precios cercanos.</p>
+            {locationMessage && <p className="mt-2 text-xs font-semibold text-blue-600">{locationMessage}</p>}
           </div>
-          <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-2xl">
-            ＋
-          </div>
+          <button onClick={requestLocation} className="rounded-2xl bg-slate-950 px-4 py-2 text-xs font-bold text-white">Usar ubicación</button>
         </div>
-      </Link>
+        <div className="mt-4 grid gap-2">
+          {nearbyStores.length === 0 && <p className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">Aún no hay tiendas cercanas con coordenadas. Los reportes aprobados seguirán mejorando esta zona.</p>}
+          {nearbyStores.map(store => (
+            <div key={store.id} className="flex items-center justify-between rounded-2xl bg-slate-50 p-3">
+              <div>
+                <p className="text-sm font-black text-slate-800">{store.name}</p>
+                <p className="text-xs text-slate-500">{store.sector || 'Sin sector'}</p>
+              </div>
+              <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-600">{formatDistance(store.distance)}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
 
       <div className="grid grid-cols-2 gap-3">
-        <Link to="/ranking" className="card flex items-center gap-3 active:scale-95 transition-transform">
-          <div className="w-10 h-10 bg-success-50 rounded-xl flex items-center justify-center">
-            <svg className="w-5 h-5 fill-success-500" viewBox="0 0 24 24">
-              <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
-            </svg>
-          </div>
-          <div>
-            <p className="text-sm font-semibold text-slate-800">Ranking</p>
-            <p className="text-xs text-slate-400">Por unidad estándar</p>
-          </div>
-        </Link>
-
-        <Link to="/report" className="card flex items-center gap-3 active:scale-95 transition-transform">
-          <div className="w-10 h-10 bg-brand-50 rounded-xl flex items-center justify-center">
-            <svg className="w-5 h-5 fill-brand-500" viewBox="0 0 24 24">
-              <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>
-            </svg>
-          </div>
-          <div>
-            <p className="text-sm font-semibold text-slate-800">Reporte</p>
-            <p className="text-xs text-slate-400">Promedios y variación</p>
-          </div>
-        </Link>
+        <Card>
+          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Hoy</p>
+          <p className="mt-1 text-2xl font-black text-slate-900">{approvedToday}</p>
+          <p className="text-xs text-slate-500">precios aprobados</p>
+        </Card>
+        <Card>
+          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Meta sugerida</p>
+          <p className="mt-1 text-2xl font-black text-slate-900">+15</p>
+          <p className="text-xs text-slate-500">puntos por reportar hoy</p>
+        </Card>
       </div>
 
-      <div>
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">Tus últimos ingresos</h3>
-        {recent.length === 0 ? (
-          <div className="card text-center py-8">
-            <p className="text-3xl mb-2">🛒</p>
-            <p className="text-sm text-slate-500">Aún no has ingresado precios.</p>
-            <Link to="/add" className="text-brand-500 text-sm font-semibold mt-2 block">
-              Ingresa tu primera compra →
-            </Link>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {recent.map(entry => (
-              <div key={entry.id} className="card flex items-center justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="font-semibold text-slate-800 text-sm truncate">
-                    {entry.product_name}
-                    {entry.brand && <span className="text-slate-400 font-normal"> · {entry.brand}</span>}
-                  </p>
-                  <p className="text-xs text-slate-400 mt-0.5 truncate">{entry.store_name}</p>
-                </div>
-                <div className="flex flex-col items-end gap-1 shrink-0">
-                  <span className="font-bold text-brand-500">{formatCLP(entry.price)}</span>
-                  {statusBadge(entry.validation_status)}
-                </div>
+      <Card>
+        <div className="flex items-center justify-between">
+          <h2 className="font-black text-slate-900">Mejores precios recientes</h2>
+          <Link to="/ranking" className="text-xs font-bold text-blue-600">Ver todo</Link>
+        </div>
+        <div className="mt-4 space-y-2">
+          {bestPrices.length === 0 && <p className="text-sm text-slate-500">Aún no hay precios aprobados.</p>}
+          {bestPrices.map(entry => (
+            <div key={entry.id} className="flex items-center justify-between rounded-2xl bg-slate-50 p-3">
+              <div>
+                <p className="text-sm font-black text-slate-800">{entry.products?.name || entry.product_name}</p>
+                <p className="text-xs text-slate-500">{entry.store_name} · {entry.sector}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-sm font-black text-emerald-600">{money(entry.unit_price || entry.price)}</p>
+                <p className="text-[11px] text-slate-400">por {entry.products?.default_unit || 'unidad'}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {opportunities.length > 0 && (
+        <Card className="border-emerald-100 bg-emerald-50/50">
+          <h2 className="font-black text-emerald-900">Alertas que se cumplieron</h2>
+          <div className="mt-3 space-y-2">
+            {opportunities.map(({ alert, match }) => (
+              <div key={alert.id} className="rounded-2xl bg-white p-3 text-sm text-emerald-800">
+                {match.product_name} está a {money(match.unit_price)} en {match.store_name}.
               </div>
             ))}
           </div>
-        )}
-      </div>
+        </Card>
+      )}
+
+      {isValidator && (
+        <Card>
+          <h2 className="font-black text-slate-900">Herramientas admin</h2>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <Link to="/quality" className="rounded-2xl bg-slate-950 px-3 py-3 text-center text-xs font-bold text-white">Calidad de datos</Link>
+            <Link to="/partners" className="rounded-2xl bg-blue-50 px-3 py-3 text-center text-xs font-bold text-blue-700">Negocios asociados</Link>
+          </div>
+        </Card>
+      )}
     </div>
   )
 }
