@@ -140,6 +140,21 @@ function formatLocation(location) {
   return `${Number(location.lat).toFixed(6)}, ${Number(location.lng).toFixed(6)}`
 }
 
+
+function initialsFromProfile(profile, user) {
+  const base = profile?.full_name || profile?.username || user?.email || 'PN'
+  return base
+    .split(/\s+|_|-|@/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0]?.toUpperCase())
+    .join('') || 'PN'
+}
+
+function avatarSeed(profile, user) {
+  return encodeURIComponent(profile?.username || user?.email || 'PriceNow')
+}
+
 export default function Profile() {
   const { user, profile, isValidator } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -153,6 +168,8 @@ export default function Profile() {
   const [profileForm, setProfileForm] = useState({ username: '', full_name: '' })
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileMessage, setProfileMessage] = useState(null)
+  const [avatarUrl, setAvatarUrl] = useState(profile?.avatar_url || '')
+  const [avatarUploading, setAvatarUploading] = useState(false)
   const [preferences, setPreferences] = useState(() => loadPreferences(user?.id))
   const [preferencesMessage, setPreferencesMessage] = useState(null)
   const [locationLoading, setLocationLoading] = useState(false)
@@ -163,6 +180,10 @@ export default function Profile() {
       full_name: profile?.full_name || '',
     })
   }, [profile?.username, profile?.full_name])
+
+  useEffect(() => {
+    setAvatarUrl(profile?.avatar_url || '')
+  }, [profile?.avatar_url])
 
   useEffect(() => {
     if (!user?.id) return
@@ -303,6 +324,61 @@ export default function Profile() {
     savePreferences(next)
   }
 
+  async function uploadAvatar(event) {
+    const file = event.target.files?.[0]
+    if (!file || !user?.id) return
+
+    if (!file.type.startsWith('image/')) {
+      setProfileMessage({ type: 'error', text: 'Selecciona una imagen válida para tu foto de perfil.' })
+      return
+    }
+
+    if (file.size > 2 * 1024 * 1024) {
+      setProfileMessage({ type: 'error', text: 'La imagen debe pesar menos de 2 MB.' })
+      return
+    }
+
+    setAvatarUploading(true)
+    setProfileMessage(null)
+
+    const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg'
+    const filePath = `${user.id}/avatar-${Date.now()}.${extension}`
+
+    const { error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(filePath, file, { cacheControl: '3600', upsert: true })
+
+    if (uploadError) {
+      setProfileMessage({ type: 'error', text: `No se pudo subir la imagen: ${uploadError.message}` })
+      setAvatarUploading(false)
+      return
+    }
+
+    const { data: publicData } = supabase.storage.from('avatars').getPublicUrl(filePath)
+    const publicUrl = publicData?.publicUrl
+
+    if (!publicUrl) {
+      setProfileMessage({ type: 'error', text: 'No se pudo obtener la URL pública de la imagen.' })
+      setAvatarUploading(false)
+      return
+    }
+
+    const { error: updateError } = await supabase
+      .from('profiles')
+      .update({ avatar_url: publicUrl, updated_at: new Date().toISOString() })
+      .eq('id', user.id)
+
+    if (updateError) {
+      setProfileMessage({ type: 'error', text: `No se pudo guardar la foto: ${updateError.message}` })
+    } else {
+      setAvatarUrl(publicUrl)
+      setProfileMessage({ type: 'success', text: 'Foto de perfil actualizada.' })
+    }
+
+    setAvatarUploading(false)
+    event.target.value = ''
+  }
+
   async function saveProfile(e) {
     e.preventDefault()
     setProfileSaving(true)
@@ -376,34 +452,56 @@ export default function Profile() {
         </div>
       )}
 
-      <section className={`rounded-3xl p-5 ${level.bg} border border-white shadow-sm`}>
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <p className="text-xs text-slate-500">Usuario</p>
-            <h3 className="text-lg font-bold text-slate-900 truncate">{profile?.full_name || profile?.username || user?.email}</h3>
-            <p className="text-xs text-slate-500 mt-1 truncate">@{profile?.username || 'usuario'} · {profile?.role || 'user'}</p>
+      <section className={`relative overflow-hidden rounded-[2rem] p-5 ${level.bg} border border-white shadow-sm`}>
+        <div className="pointer-events-none absolute -right-10 -top-10 h-32 w-32 rounded-full bg-white/55 blur-2xl" />
+        <div className="relative flex items-start gap-4">
+          <div className="shrink-0">
+            <label className="group relative block h-20 w-20 cursor-pointer overflow-hidden rounded-3xl bg-gradient-to-br from-brand-600 to-brand-500 shadow-lg shadow-brand-500/20 ring-4 ring-white">
+              {avatarUrl ? (
+                <img src={avatarUrl} alt="Foto de perfil" className="h-full w-full object-cover" />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center text-2xl font-black text-white">
+                  {initialsFromProfile(profile, user)}
+                </div>
+              )}
+              <span className="absolute inset-x-0 bottom-0 bg-slate-950/55 py-1 text-center text-[10px] font-bold text-white opacity-0 transition-opacity group-hover:opacity-100">
+                Cambiar
+              </span>
+              <input type="file" accept="image/*" onChange={uploadAvatar} className="hidden" />
+            </label>
+            {avatarUploading && <p className="mt-2 text-center text-[10px] font-bold text-brand-600">Subiendo...</p>}
           </div>
-          <div className="text-right shrink-0">
-            <p className="text-xs text-slate-500">Nivel</p>
-            <p className={`text-lg font-black ${level.color}`}>{level.name}</p>
-          </div>
-        </div>
 
-        <div className="mt-5">
-          <div className="flex items-end justify-between mb-2">
-            <div>
-              <p className="text-xs text-slate-500">Puntos disponibles</p>
-              <p className="text-3xl font-black text-brand-600">{points}</p>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs text-slate-500">Usuario</p>
+                <h3 className="truncate text-xl font-black text-slate-950">{profile?.full_name || profile?.username || user?.email}</h3>
+                <p className="mt-1 truncate text-xs text-slate-500">@{profile?.username || avatarSeed(profile, user)} · {profile?.role || 'user'}</p>
+              </div>
+              <div className="shrink-0 rounded-2xl bg-white/70 px-3 py-2 text-right">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Nivel</p>
+                <p className={`text-base font-black ${level.color}`}>{level.name}</p>
+              </div>
             </div>
-            <div className="text-right">
-              <p className="text-xs text-slate-500">Históricos</p>
-              <p className="font-black text-slate-800">{lifetimePoints}</p>
+
+            <div className="mt-5">
+              <div className="mb-2 flex items-end justify-between">
+                <div>
+                  <p className="text-xs text-slate-500">Puntos disponibles</p>
+                  <p className="text-3xl font-black text-brand-600">{points}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-slate-500">Históricos</p>
+                  <p className="font-black text-slate-800">{lifetimePoints}</p>
+                </div>
+              </div>
+              <ProgressBar value={nextLevelProgress} max={100} />
+              <p className="mt-2 text-[11px] text-slate-500">
+                Sube de nivel con aportes aprobados y usa tus puntos en beneficios.
+              </p>
             </div>
           </div>
-          <ProgressBar value={nextLevelProgress} max={100} />
-          <p className="text-[11px] text-slate-500 mt-2">
-            Participa con precios aprobados para subir de nivel y canjear beneficios.
-          </p>
         </div>
       </section>
 
