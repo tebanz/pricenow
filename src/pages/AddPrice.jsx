@@ -39,6 +39,58 @@ function distanceKm(a, b) {
   return R * c
 }
 
+function osmElementPosition(element) {
+  const lat = element.lat ?? element.center?.lat
+  const lng = element.lon ?? element.center?.lon
+  if (lat == null || lng == null) return null
+  return { lat: Number(lat), lng: Number(lng) }
+}
+
+function osmElementAddress(tags = {}) {
+  const street = tags['addr:street']
+  const number = tags['addr:housenumber']
+  const suburb = tags['addr:suburb'] || tags['addr:neighbourhood']
+  const city = tags['addr:city']
+  const parts = []
+  if (street) parts.push(number ? `${street} ${number}` : street)
+  if (suburb) parts.push(suburb)
+  if (city) parts.push(city)
+  return parts.join(', ')
+}
+
+function normalizeOsmPlace(element, origin) {
+  const position = osmElementPosition(element)
+  if (!position) return null
+
+  const tags = element.tags || {}
+  const name = tags.name || tags.brand || tags.operator
+  if (!name) return null
+
+  return {
+    id: `${element.type}/${element.id}`,
+    name,
+    type: tags.shop || tags.amenity || 'comercio',
+    address: osmElementAddress(tags),
+    lat: Number(position.lat.toFixed(7)),
+    lng: Number(position.lng.toFixed(7)),
+    distance_km: distanceKm(origin, position),
+    source: 'openstreetmap_overpass',
+  }
+}
+
+function buildOverpassNearbyQuery(lat, lng) {
+  const radiusMeters = 900
+  return `
+    [out:json][timeout:12];
+    (
+      node["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall"](around:${radiusMeters},${lat},${lng});
+      way["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall"](around:${radiusMeters},${lat},${lng});
+      relation["shop"~"supermarket|convenience|greengrocer|bakery|butcher|dairy|mall"](around:${radiusMeters},${lat},${lng});
+    );
+    out center tags 25;
+  `
+}
+
 export default function AddPrice() {
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -53,6 +105,9 @@ export default function AddPrice() {
   const [success, setSuccess] = useState(false)
   const [location, setLocation] = useState(null)
   const [locationLoading, setLocationLoading] = useState(false)
+  const [osmPlaces, setOsmPlaces] = useState([])
+  const [osmLoading, setOsmLoading] = useState(false)
+  const [osmSearched, setOsmSearched] = useState(false)
 
   const unitPrice = calcUnitPrice(form.price, form.quantity, form.unit)
 
@@ -150,6 +205,57 @@ export default function AddPrice() {
 
   function clearLocation() {
     setLocation(null)
+    setOsmPlaces([])
+    setOsmSearched(false)
+  }
+
+  function applyOsmPlace(place) {
+    setForm(prev => ({
+      ...prev,
+      store_name: place.name,
+      _store_id: null,
+    }))
+  }
+
+  async function searchNearbyOsmPlaces() {
+    if (!location) {
+      setError('Primero debes usar tu ubicación actual.')
+      return
+    }
+
+    setError(null)
+    setOsmLoading(true)
+    setOsmSearched(true)
+
+    try {
+      const query = buildOverpassNearbyQuery(location.lat, location.lng)
+      const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`
+      const response = await fetch(url)
+
+      if (!response.ok) {
+        throw new Error(`Overpass respondió con estado ${response.status}`)
+      }
+
+      const data = await response.json()
+      const unique = new Map()
+
+      ;(data.elements || [])
+        .map(element => normalizeOsmPlace(element, location))
+        .filter(Boolean)
+        .filter(place => place.distance_km != null)
+        .sort((a, b) => a.distance_km - b.distance_km)
+        .forEach(place => {
+          const key = `${place.name.toLowerCase()}-${place.lat}-${place.lng}`
+          if (!unique.has(key)) unique.set(key, place)
+        })
+
+      setOsmPlaces(Array.from(unique.values()).slice(0, 8))
+    } catch (err) {
+      setError('No se pudieron detectar negocios cercanos con OpenStreetMap. Puedes ingresar la tienda manualmente.')
+      setOsmPlaces([])
+    } finally {
+      setOsmLoading(false)
+    }
   }
 
   function validate() {
@@ -389,6 +495,47 @@ export default function AddPrice() {
                     Quitar
                   </button>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={searchNearbyOsmPlaces}
+                  disabled={osmLoading}
+                  className="btn-primary w-full text-sm py-2"
+                >
+                  {osmLoading ? 'Buscando negocios cercanos…' : 'Detectar negocios cercanos gratis'}
+                </button>
+
+                <p className="text-[11px] text-slate-400">
+                  Búsqueda referencial con OpenStreetMap. Si no aparece el local correcto, ingrésalo manualmente.
+                </p>
+
+                {osmPlaces.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold text-slate-700">Negocios cercanos detectados</p>
+                    {osmPlaces.map(place => (
+                      <button
+                        key={place.id}
+                        type="button"
+                        onClick={() => applyOsmPlace(place)}
+                        className="w-full bg-white rounded-lg p-2 text-left border border-slate-200 active:scale-95 transition-transform"
+                      >
+                        <p className="text-sm font-semibold text-slate-800">{place.name}</p>
+                        <p className="text-xs text-slate-500">
+                          {place.type} · aprox. {place.distance_km.toFixed(2)} km
+                        </p>
+                        {place.address && (
+                          <p className="text-xs text-slate-400">{place.address}</p>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {osmSearched && !osmLoading && osmPlaces.length === 0 && (
+                  <p className="text-xs text-slate-500">
+                    No se encontraron negocios cercanos en OpenStreetMap. Puedes escribir la tienda manualmente.
+                  </p>
+                )}
               </div>
             ) : (
               <div className="space-y-2">
