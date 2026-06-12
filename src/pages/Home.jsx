@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { dedupePlaces, isDuplicatePlace, placeToStore } from '../utils/geoPlaces'
-import { formatDistance, getDistanceMeters, isValidCoordinate } from '../utils/location'
+import { formatDistance, getDistanceMeters, getStoredZone, isValidCoordinate, reverseGeocode, setStoredZone, zoneSubtitle } from '../utils/location'
 import { normalizeName } from '../utils/normalize'
 
 const NEARBY_RADIUS_M = 8000
@@ -13,11 +13,6 @@ const PROVIDER_LIMIT = 12
 
 function hasCoords(row) {
   return isValidCoordinate(row?.latitude, row?.longitude)
-}
-
-function isOptionalSourceError(error) {
-  const message = error?.message || ''
-  return /source/i.test(message) && /(column|schema cache|could not find)/i.test(message)
 }
 
 function readFlexiblePoints(row) {
@@ -53,6 +48,9 @@ export default function Home() {
   const [localMessage, setLocalMessage] = useState(null)
   const [sectors, setSectors] = useState([])
   const [stats, setStats] = useState({ today: 0, points: 0 })
+  const [zone, setZone] = useState(() => getStoredZone())
+  const [manualZone, setManualZone] = useState(() => ({ region: getStoredZone()?.region || '', commune: getStoredZone()?.commune || '' }))
+  const [zoneSaving, setZoneSaving] = useState(false)
 
   async function load() {
     const start = new Date()
@@ -61,7 +59,7 @@ export default function Home() {
     const [storesRes, sectorsRes, todayRes, points] = await Promise.all([
       supabase
         .from('stores')
-        .select('id, name, chain, type, sector, address, latitude, longitude, is_verified')
+        .select('*')
         .eq('is_active', true)
         .not('latitude', 'is', null)
         .not('longitude', 'is', null)
@@ -139,6 +137,53 @@ export default function Home() {
     setOsmStatus({ state: lastError ? 'error' : 'empty', radius: SEARCH_RADII_M[SEARCH_RADII_M.length - 1], provider: null })
   }
 
+  async function savePreferredZone(nextZone) {
+    const saved = setStoredZone(nextZone)
+    setZone(saved)
+    setManualZone({ region: saved?.region || '', commune: saved?.commune || '' })
+
+    if (!user?.id || !nextZone?.commune) return
+    setZoneSaving(true)
+    const payload = {
+      preferred_commune: nextZone.commune,
+      preferred_region: nextZone.region || nextZone.state || null,
+      preferred_latitude: nextZone.lat || null,
+      preferred_longitude: nextZone.lng || null,
+      updated_at: new Date().toISOString(),
+    }
+
+    let nextPayload = { ...payload }
+    let result = null
+    const optionalColumns = ['preferred_region', 'preferred_latitude', 'preferred_longitude']
+
+    for (let attempt = 0; attempt < optionalColumns.length + 1; attempt += 1) {
+      result = await supabase.from('profiles').update(nextPayload).eq('id', user.id)
+      if (!result.error) break
+
+      const message = result.error.message || ''
+      const missingColumn = optionalColumns.find(column => nextPayload[column] !== undefined && new RegExp(column, 'i').test(message))
+      if (!missingColumn || !/(column|schema cache|could not find)/i.test(message)) break
+
+      const { [missingColumn]: _removed, ...fallbackPayload } = nextPayload
+      nextPayload = fallbackPayload
+    }
+    if (result.error) console.error('PriceNow preferred zone save failed:', result.error)
+    setZoneSaving(false)
+  }
+
+  async function chooseManualZone(event) {
+    event.preventDefault()
+    if (!manualZone.commune.trim()) return
+    await savePreferredZone({
+      country: 'Chile',
+      region: manualZone.region.trim(),
+      city: manualZone.commune.trim(),
+      commune: manualZone.commune.trim(),
+      source: 'manual',
+    })
+    setLocalMessage({ type: 'ok', text: `Zona preferida actualizada: ${manualZone.commune.trim()}.` })
+  }
+
   function askLocation() {
     if (!navigator.geolocation) {
       setLocationStatus('error')
@@ -155,6 +200,13 @@ export default function Home() {
         setPosition(nextPosition)
         setLocationStatus('ok')
         fetchMapNearby(nextPosition)
+        reverseGeocode(nextPosition.lat, nextPosition.lng)
+          .then(detectedZone => {
+            if (detectedZone) {
+              savePreferredZone({ ...detectedZone, lat: nextPosition.lat, lng: nextPosition.lng, source: 'gps' })
+            }
+          })
+          .catch(err => console.error('PriceNow reverse geocode failed:', err))
       },
       () => setLocationStatus('error'),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
@@ -165,18 +217,16 @@ export default function Home() {
     let nextPayload = { ...payload }
     let result = null
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    const optionalColumns = ['source', 'store_type', 'location_source', 'city', 'commune', 'region']
+
+    for (let attempt = 0; attempt < optionalColumns.length + 1; attempt += 1) {
       result = await supabase.from('stores').insert(nextPayload).select('id').single()
       if (!result.error) return result
 
       const message = result.error.message || ''
-      if (nextPayload.source && isOptionalSourceError(result.error)) {
-        const { source, ...fallbackPayload } = nextPayload
-        nextPayload = fallbackPayload
-        continue
-      }
-      if (nextPayload.location_source && /location_source/i.test(message) && /(column|schema cache|could not find)/i.test(message)) {
-        const { location_source, ...fallbackPayload } = nextPayload
+      const missingColumn = optionalColumns.find(column => nextPayload[column] !== undefined && new RegExp(column, 'i').test(message))
+      if (missingColumn && /(column|schema cache|could not find)/i.test(message)) {
+        const { [missingColumn]: _removed, ...fallbackPayload } = nextPayload
         nextPayload = fallbackPayload
         continue
       }
@@ -199,8 +249,12 @@ export default function Home() {
       normalized_name: normalizeName(store.name),
       chain: null,
       type: store.type || 'negocio',
+      store_type: store.type || 'negocio',
       sector: store.sector || 'Sin sector',
       sector_id: null,
+      city: store.city || store.commune || null,
+      commune: store.commune || store.sector || null,
+      region: store.region || null,
       address: store.address || null,
       latitude: Number(store.latitude),
       longitude: Number(store.longitude),
@@ -320,6 +374,11 @@ export default function Home() {
             Ubicacion activada{position?.accuracy ? `, precision aprox. ${position.accuracy} m` : ''}.
           </p>
         )}
+        {zone?.commune && (
+          <p className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+            Estas en {zoneSubtitle(zone)}.
+          </p>
+        )}
         {localMessage && <p className={`mt-3 rounded-2xl px-3 py-2 text-sm font-semibold ${localMessage.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{localMessage.text}</p>}
         {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicacion. Puedes seguir usando PriceNow sin compartirla.</p>}
         {sectorDetection?.type === 'ok' && <p className="mt-3 rounded-2xl bg-blue-50 px-3 py-2 text-sm text-blue-700">Sector probable: <b>{sectorDetection.name}</b>.</p>}
@@ -330,6 +389,18 @@ export default function Home() {
             Activa ubicacion para ver negocios cercanos. Los negocios sin coordenadas validas no aparecen como cercanos.
           </p>
         )}
+
+        <details className="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
+          <summary className="cursor-pointer text-sm font-black text-slate-800">Cambiar zona</summary>
+          <form onSubmit={chooseManualZone} className="mt-3 grid gap-2">
+            <input value={manualZone.region} onChange={e => setManualZone({ ...manualZone, region: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Region, ej: Metropolitana" />
+            <input value={manualZone.commune} onChange={e => setManualZone({ ...manualZone, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna, ej: Providencia" />
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" onClick={askLocation} disabled={locationStatus === 'loading'} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white disabled:opacity-50">Usar mi ubicacion actual</button>
+              <button disabled={zoneSaving || !manualZone.commune.trim()} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{zoneSaving ? 'Guardando...' : 'Elegir comuna manualmente'}</button>
+            </div>
+          </form>
+        </details>
 
         {position && osmStatus.state === 'loading' && (
           <p className="mt-3 rounded-2xl bg-blue-50 p-3 text-sm font-semibold text-blue-700">

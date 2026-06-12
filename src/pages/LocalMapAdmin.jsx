@@ -2,28 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { mapProviderType } from '../utils/geoPlaces'
-import { formatDistance, getDistanceMeters, isValidCoordinate } from '../utils/location'
+import { formatDistance, getDistanceMeters, getStoredZone, isValidCoordinate, reverseGeocode, setStoredZone } from '../utils/location'
 import { normalizeName } from '../utils/normalize'
 
 const STORE_TYPES = ['supermercado', 'minimarket', 'almacen', 'panaderia', 'carniceria', 'verduleria', 'feria', 'mayorista', 'farmacia', 'otro']
 const SEARCH_TYPES = ['all', 'supermercado', 'minimarket', 'panaderia', 'farmacia', 'otros']
 const MAX_SECTOR_DETECTION_M = 50000
 
-const EMPTY_STORE = { name: '', chain: '', type: 'supermercado', sector: '', address: '', latitude: '', longitude: '', is_verified: true, location_source: 'admin' }
-const EMPTY_SECTOR = { commune: 'Rancagua', name: '', latitude: '', longitude: '', radius_m: 900, is_active: true }
-const EMPTY_SEARCH = { name: '', commune: 'Rancagua', address: '', type: 'supermercado' }
-const EMPTY_IMPORT = { commune: 'Rancagua', type: 'supermercado', sector: '' }
+const EMPTY_STORE = { name: '', chain: '', type: 'supermercado', sector: '', address: '', city: '', commune: '', region: '', latitude: '', longitude: '', is_verified: true, location_source: 'admin' }
+const EMPTY_SECTOR = { commune: '', name: '', latitude: '', longitude: '', radius_m: 900, is_active: true }
+const EMPTY_SEARCH = { name: '', commune: '', address: '', type: 'supermercado' }
+const EMPTY_IMPORT = { commune: '', type: 'supermercado', sector: '' }
 const EMPTY_NEARBY_SEARCH = { radius_m: '1500', type: 'all' }
 
 const normalize = normalizeName
 
 function hasCoords(row) {
   return isValidCoordinate(row?.latitude, row?.longitude)
-}
-
-function isOptionalSourceError(error) {
-  const message = error?.message || ''
-  return /source/i.test(message) && /(column|schema cache|could not find)/i.test(message)
 }
 
 function coordinatePayload(lat, lng) {
@@ -110,6 +105,8 @@ function CandidateCard({ candidate, duplicate, onSelect, onSave, saving }) {
 
 export default function LocalMapAdmin() {
   const { user, isValidator } = useAuth()
+  const preferredZone = getStoredZone()
+  const defaultCommune = preferredZone?.commune || ''
   const [stores, setStores] = useState([])
   const [sectors, setSectors] = useState([])
   const [query, setQuery] = useState('')
@@ -122,13 +119,13 @@ export default function LocalMapAdmin() {
   const [message, setMessage] = useState(null)
   const [position, setPosition] = useState(null)
   const [storeForm, setStoreForm] = useState(EMPTY_STORE)
-  const [sectorForm, setSectorForm] = useState(EMPTY_SECTOR)
+  const [sectorForm, setSectorForm] = useState({ ...EMPTY_SECTOR, commune: defaultCommune })
   const [editingStoreId, setEditingStoreId] = useState(null)
   const [editingSectorId, setEditingSectorId] = useState(null)
-  const [searchForm, setSearchForm] = useState(EMPTY_SEARCH)
+  const [searchForm, setSearchForm] = useState({ ...EMPTY_SEARCH, commune: defaultCommune })
   const [searchResults, setSearchResults] = useState([])
   const [searchLoading, setSearchLoading] = useState(false)
-  const [importForm, setImportForm] = useState(EMPTY_IMPORT)
+  const [importForm, setImportForm] = useState({ ...EMPTY_IMPORT, commune: defaultCommune })
   const [importCandidates, setImportCandidates] = useState([])
   const [importLoading, setImportLoading] = useState(false)
   const [nearbyForm, setNearbyForm] = useState(EMPTY_NEARBY_SEARCH)
@@ -160,7 +157,7 @@ export default function LocalMapAdmin() {
     const q = normalize(query)
     return stores
       .filter(store => store.is_active !== false)
-      .filter(store => !q || normalize(`${store.name} ${store.chain} ${store.sector} ${store.address} ${store.type}`).includes(q))
+      .filter(store => !q || normalize(`${store.name} ${store.chain} ${store.sector} ${store.commune} ${store.city} ${store.address} ${store.type}`).includes(q))
       .filter(store => coordFilter === 'all' || (coordFilter === 'with' ? hasCoords(store) : !hasCoords(store)))
       .filter(store => verifiedFilter === 'all' || (verifiedFilter === 'verified' ? store.is_verified : !store.is_verified))
       .filter(store => typeFilter === 'all' || (store.type || 'otro') === typeFilter)
@@ -222,6 +219,16 @@ export default function LocalMapAdmin() {
         if (target === 'store') setStoreForm(prev => ({ ...prev, latitude: lat, longitude: lng, location_source: 'admin_current_location' }))
         if (target === 'sector') setSectorForm(prev => ({ ...prev, latitude: lat, longitude: lng }))
         if (target === 'nearby') setNearbyCandidates([])
+        reverseGeocode(pos.lat, pos.lng)
+          .then(detectedZone => {
+            if (!detectedZone?.commune) return
+            const savedZone = setStoredZone({ ...detectedZone, lat: pos.lat, lng: pos.lng, source: 'gps' })
+            const detectedCommune = savedZone?.commune || ''
+            setSectorForm(prev => ({ ...prev, commune: prev.commune || detectedCommune }))
+            setSearchForm(prev => ({ ...prev, commune: prev.commune || detectedCommune }))
+            setImportForm(prev => ({ ...prev, commune: prev.commune || detectedCommune }))
+          })
+          .catch(err => console.error('PriceNow admin reverse geocode failed:', err))
         setMessage({ type: 'ok', text: `Ubicacion capturada: ${lat}, ${lng}` })
       },
       () => setMessage({ type: 'error', text: 'No se pudo obtener ubicacion. Revisa permisos del navegador.' }),
@@ -368,6 +375,9 @@ export default function LocalMapAdmin() {
       type: mapOsmType(candidate.type),
       sector: sectorName,
       address: candidate.address || prev.address,
+      city: candidate.city || candidate.commune || prev.city,
+      commune: candidate.commune || prev.commune,
+      region: candidate.region || prev.region,
       latitude: String(candidate.lat || ''),
       longitude: String(candidate.lng || ''),
       is_verified: verified,
@@ -380,24 +390,16 @@ export default function LocalMapAdmin() {
   async function insertStore(payload) {
     let nextPayload = { ...payload }
     let result = null
+    const optionalColumns = ['source', 'store_type', 'location_source', 'city', 'commune', 'region']
 
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    for (let attempt = 0; attempt < optionalColumns.length + 1; attempt += 1) {
       result = await supabase.from('stores').insert(nextPayload).select('id').single()
       if (!result.error) return result
 
       const message = result.error.message || ''
-      if (nextPayload.source && isOptionalSourceError(result.error)) {
-        const { source, ...fallbackPayload } = nextPayload
-        nextPayload = fallbackPayload
-        continue
-      }
-      if (nextPayload.store_type && /store_type/i.test(message) && /(column|schema cache|could not find)/i.test(message)) {
-        const { store_type, ...fallbackPayload } = nextPayload
-        nextPayload = fallbackPayload
-        continue
-      }
-      if (nextPayload.location_source && /location_source/i.test(message) && /(column|schema cache|could not find)/i.test(message)) {
-        const { location_source, ...fallbackPayload } = nextPayload
+      const missingColumn = optionalColumns.find(column => nextPayload[column] !== undefined && new RegExp(column, 'i').test(message))
+      if (missingColumn && /(column|schema cache|could not find)/i.test(message)) {
+        const { [missingColumn]: _removed, ...fallbackPayload } = nextPayload
         nextPayload = fallbackPayload
         continue
       }
@@ -415,6 +417,7 @@ export default function LocalMapAdmin() {
     }
 
     const sector = sectorFromName(preferredSector || candidate.sector || '')
+    const candidateCommune = candidate.commune || sector?.commune || importForm.commune || searchForm.commune || preferredZone?.commune || null
     const payload = {
       name: candidate.name.trim(),
       normalized_name: normalize(candidate.name),
@@ -423,6 +426,9 @@ export default function LocalMapAdmin() {
       store_type: mapOsmType(candidate.type),
       sector: sector?.name || preferredSector || candidate.sector || 'Sin sector',
       sector_id: sector?.id || null,
+      city: candidate.city || candidateCommune,
+      commune: candidateCommune,
+      region: candidate.region || preferredZone?.region || null,
       address: candidate.address || null,
       ...coordinatePayload(candidate.lat, candidate.lng),
       source: candidate.source || 'geoapify',
@@ -451,8 +457,9 @@ export default function LocalMapAdmin() {
     event.preventDefault()
     setSaving(true)
     setMessage(null)
+    const fallbackCommune = sectorForm.commune.trim() || preferredZone?.commune || 'Chile'
     const payload = {
-      commune: sectorForm.commune.trim() || 'Rancagua',
+      commune: fallbackCommune,
       name: sectorForm.name.trim(),
       normalized_name: normalize(sectorForm.name),
       ...coordinatePayload(sectorForm.latitude, sectorForm.longitude),
@@ -468,7 +475,7 @@ export default function LocalMapAdmin() {
 
     setSaving(false)
     if (result.error) return setMessage({ type: 'error', text: result.error.message })
-    setSectorForm({ ...EMPTY_SECTOR, commune: sectorForm.commune || 'Rancagua' })
+    setSectorForm({ ...EMPTY_SECTOR, commune: fallbackCommune === 'Chile' ? '' : fallbackCommune })
     setEditingSectorId(null)
     setMessage({ type: 'ok', text: editingSectorId ? 'Sector actualizado.' : 'Sector guardado.' })
     await load()
@@ -491,6 +498,7 @@ export default function LocalMapAdmin() {
     }
 
     const sector = sectorFromName(storeForm.sector)
+    const storeCommune = storeForm.commune || sector?.commune || preferredZone?.commune || null
     const payload = {
       name: storeForm.name.trim(),
       normalized_name: normalize(storeForm.name),
@@ -499,6 +507,9 @@ export default function LocalMapAdmin() {
       ...(!editingStoreId ? { store_type: storeForm.type || 'otro' } : {}),
       sector: sector?.name || storeForm.sector || 'Sin sector',
       sector_id: sector?.id || null,
+      city: storeForm.city || storeCommune,
+      commune: storeCommune,
+      region: storeForm.region || preferredZone?.region || null,
       address: storeForm.address.trim() || null,
       ...coords,
       location_source: storeForm.location_source || 'admin',
@@ -555,6 +566,9 @@ export default function LocalMapAdmin() {
       type: store.type || 'supermercado',
       sector: store.sector || '',
       address: store.address || '',
+      city: store.city || '',
+      commune: store.commune || '',
+      region: store.region || '',
       latitude: store.latitude || '',
       longitude: store.longitude || '',
       is_verified: store.is_verified ?? true,
@@ -566,7 +580,7 @@ export default function LocalMapAdmin() {
   function editSector(sector) {
     setEditingSectorId(sector.id)
     setSectorForm({
-      commune: sector.commune || 'Rancagua',
+      commune: sector.commune || preferredZone?.commune || '',
       name: sector.name || '',
       latitude: sector.latitude || '',
       longitude: sector.longitude || '',
@@ -583,7 +597,7 @@ export default function LocalMapAdmin() {
 
   function cancelSectorEdit() {
     setEditingSectorId(null)
-    setSectorForm(EMPTY_SECTOR)
+    setSectorForm({ ...EMPTY_SECTOR, commune: preferredZone?.commune || '' })
   }
 
   if (!isValidator) return <div className="rounded-3xl bg-white p-5 shadow-sm">Solo admin o validador puede entrar.</div>

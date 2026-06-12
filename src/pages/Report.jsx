@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { formatUnitPrice, priceChangeDisplay } from '../utils/priceCalc'
+import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowCommune, sameCommune, zoneSubtitle } from '../utils/location'
 import Spinner from '../components/UI/Spinner'
 import { format, startOfWeek, endOfWeek, subWeeks, subDays } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -8,6 +9,35 @@ import { es } from 'date-fns/locale'
 function average(values) {
   if (!values.length) return null
   return values.reduce((acc, value) => acc + Number(value || 0), 0) / values.length
+}
+
+function rowDistanceFromZone(row, zone) {
+  const lat = row.purchase_latitude ?? row.latitude
+  const lng = row.purchase_longitude ?? row.longitude
+  return getDistanceMeters(zone?.lat, zone?.lng, lat, lng)
+}
+
+function filterRowsByZone(rows, zoneMode, zone) {
+  if (zoneMode === 'all') return rows
+  if (zoneMode === 'commune') {
+    if (!zone?.commune) return rows
+    return rows.filter(row => sameCommune(rowCommune(row), zone.commune))
+  }
+  if (zoneMode === 'nearby') {
+    if (!isValidCoordinate(zone?.lat, zone?.lng)) return rows
+    return rows.filter(row => {
+      const distance = rowDistanceFromZone(row, zone)
+      return distance != null && distance <= 5000
+    })
+  }
+  return rows
+}
+
+function zoneFilterLabel(zoneMode, zone) {
+  if (zoneMode === 'nearby') return 'Cerca de mi'
+  if (zoneMode === 'commune' && zone?.commune) return zoneSubtitle(zone)
+  if (zoneMode === 'commune') return 'Mi comuna'
+  return 'Todas las zonas'
 }
 
 function normalizeText(value = '') {
@@ -185,13 +215,25 @@ export default function Report() {
   const [periodMode, setPeriodMode] = useState('30d')
   const [weekOffset, setWeekOffset] = useState(0)
   const [search, setSearch] = useState('')
+  const [zoneMode, setZoneMode] = useState(() => getStoredZone()?.commune ? 'commune' : 'all')
+  const [currentZone, setCurrentZone] = useState(() => getStoredZone())
 
   const range = getRange(periodMode, weekOffset)
+
+  useEffect(() => {
+    const updateZone = event => setCurrentZone(event?.detail || getStoredZone())
+    window.addEventListener(PRICE_NOW_ZONE_EVENT, updateZone)
+    window.addEventListener('storage', updateZone)
+    return () => {
+      window.removeEventListener(PRICE_NOW_ZONE_EVENT, updateZone)
+      window.removeEventListener('storage', updateZone)
+    }
+  }, [])
 
   async function fetchApprovedRows(start, end) {
     let query = supabase
       .from('price_entries')
-      .select('product_id, product_name, brand, price, quantity, unit_price, unit, store_name, purchase_date, products(id, name, canonical_name, category, default_unit)')
+      .select('*, products(id, name, canonical_name, category, default_unit)')
       .eq('validation_status', 'approved')
       .order('purchase_date', { ascending: false })
       .limit(2500)
@@ -226,14 +268,16 @@ export default function Report() {
       return
     }
 
-    setReportRows(buildReport(currentRes.data ?? [], previousRes.data ?? []))
+    const currentRows = filterRowsByZone(currentRes.data ?? [], zoneMode, currentZone)
+    const previousRows = filterRowsByZone(previousRes.data ?? [], zoneMode, currentZone)
+    setReportRows(buildReport(currentRows, previousRows))
     setLoading(false)
   }
 
   useEffect(() => {
     loadLiveReport()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [periodMode, weekOffset])
+  }, [periodMode, weekOffset, zoneMode, currentZone?.commune, currentZone?.lat, currentZone?.lng])
 
   const filteredRows = reportRows.filter(row => {
     const term = normalizeText(search)
@@ -291,6 +335,15 @@ export default function Report() {
           <p className="text-xs text-slate-400">Incluye productos aprobados del período seleccionado.</p>
         </div>
       )}
+
+      <div className="mb-4 rounded-xl border border-slate-200 bg-white p-3">
+        <select value={zoneMode} onChange={e => setZoneMode(e.target.value)} className="input-field">
+          <option value="nearby">Cerca de mi</option>
+          <option value="commune">Mi comuna</option>
+          <option value="all">Todas las zonas</option>
+        </select>
+        <p className="mt-2 text-xs font-semibold text-slate-400">Zona: {zoneFilterLabel(zoneMode, currentZone)}</p>
+      </div>
 
       <div className="flex gap-2 mb-4">
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar producto en el reporte…" className="input-field flex-1" />

@@ -1,6 +1,8 @@
 import { Outlet } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import BottomNav from './BottomNav'
 import { useAuth } from '../../context/AuthContext'
+import { getStoredZone, PRICE_NOW_ZONE_EVENT, zoneDisplayName } from '../../utils/location'
 
 function BrandMark() {
   return (
@@ -12,6 +14,19 @@ function BrandMark() {
 
 export default function Layout() {
   const { profile, signOut } = useAuth()
+  const [zone, setZone] = useState(() => getStoredZone())
+
+  useEffect(() => {
+    function handleZoneChange(event) {
+      setZone(event.detail || getStoredZone())
+    }
+    window.addEventListener(PRICE_NOW_ZONE_EVENT, handleZoneChange)
+    window.addEventListener('storage', handleZoneChange)
+    return () => {
+      window.removeEventListener(PRICE_NOW_ZONE_EVENT, handleZoneChange)
+      window.removeEventListener('storage', handleZoneChange)
+    }
+  }, [])
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
@@ -21,7 +36,9 @@ export default function Layout() {
             <BrandMark />
             <div className="min-w-0">
               <span className="block truncate text-lg font-black leading-none tracking-tight">PriceNow</span>
-              <p className="text-[11px] font-semibold leading-none text-white/70">PriceNow por KairosNow</p>
+              <p className="text-[11px] font-semibold leading-none text-white/70">
+                PriceNow por KairosNow{zone ? ` · ${zoneDisplayName(zone)}` : ''}
+              </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-3">

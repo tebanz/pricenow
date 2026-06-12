@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import Report from './Report'
 import { supabase } from '../lib/supabase'
-import { formatCLP, formatUnitPrice, SECTORES_RANCAGUA } from '../utils/priceCalc'
+import { formatCLP, formatUnitPrice } from '../utils/priceCalc'
+import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowCommune, sameCommune, zoneSubtitle } from '../utils/location'
 import Spinner from '../components/UI/Spinner'
 
 function normalizeText(value = '') {
@@ -80,6 +81,35 @@ function average(values) {
   return values.reduce((acc, value) => acc + Number(value || 0), 0) / values.length
 }
 
+function rowDistanceFromZone(row, zone) {
+  const lat = row.purchase_latitude ?? row.latitude
+  const lng = row.purchase_longitude ?? row.longitude
+  return getDistanceMeters(zone?.lat, zone?.lng, lat, lng)
+}
+
+function filterRowsByZone(rows, zoneMode, zone) {
+  if (zoneMode === 'all') return rows
+  if (zoneMode === 'commune') {
+    if (!zone?.commune) return rows
+    return rows.filter(row => sameCommune(rowCommune(row), zone.commune))
+  }
+  if (zoneMode === 'nearby') {
+    if (!isValidCoordinate(zone?.lat, zone?.lng)) return rows
+    return rows.filter(row => {
+      const distance = rowDistanceFromZone(row, zone)
+      return distance != null && distance <= 5000
+    })
+  }
+  return rows
+}
+
+function zoneFilterLabel(zoneMode, zone) {
+  if (zoneMode === 'nearby') return 'Cerca de mi'
+  if (zoneMode === 'commune' && zone?.commune) return zoneSubtitle(zone)
+  if (zoneMode === 'commune') return 'Mi comuna'
+  return 'Todas las zonas'
+}
+
 function buildRanking(rows, searchTerm) {
   const term = normalizeText(searchTerm)
   const groups = {}
@@ -114,11 +144,12 @@ function buildRanking(rows, searchTerm) {
       return
     }
 
-    const storeKey = `${normalizeText(row.store_name)}__${row.sector || ''}`
+    const storeZone = rowCommune(row) || 'Sin comuna'
+    const storeKey = `${normalizeText(row.store_name)}__${storeZone}`
     if (!groups[groupKey].stores[storeKey]) {
       groups[groupKey].stores[storeKey] = {
         store_name: row.store_name || 'Tienda sin nombre',
-        sector: row.sector || 'Sin sector',
+        sector: storeZone,
         unit: standardUnit,
         unit_prices: [],
         entries: [],
@@ -177,13 +208,24 @@ export default function Ranking() {
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTab = searchParams.get('tab') === 'reportes' ? 'reportes' : 'ranking'
   const [query, setQuery] = useState('')
-  const [sector, setSector] = useState('')
+  const [zoneMode, setZoneMode] = useState(() => getStoredZone()?.commune ? 'commune' : 'all')
+  const [currentZone, setCurrentZone] = useState(() => getStoredZone())
   const [period, setPeriod] = useState('30d')
   const [rows, setRows] = useState([])
   const [results, setResults] = useState([])
   const [loading, setLoading] = useState(false)
   const [searched, setSearched] = useState(false)
   const [error, setError] = useState(null)
+
+  useEffect(() => {
+    const updateZone = event => setCurrentZone(event?.detail || getStoredZone())
+    window.addEventListener(PRICE_NOW_ZONE_EVENT, updateZone)
+    window.addEventListener('storage', updateZone)
+    return () => {
+      window.removeEventListener(PRICE_NOW_ZONE_EVENT, updateZone)
+      window.removeEventListener('storage', updateZone)
+    }
+  }, [])
 
   const loadRows = useCallback(async () => {
     setLoading(true)
@@ -193,18 +235,7 @@ export default function Ranking() {
     let request = supabase
       .from('price_entries')
       .select(`
-        id,
-        product_id,
-        product_name,
-        brand,
-        quantity,
-        unit,
-        price,
-        unit_price,
-        store_name,
-        sector,
-        purchase_date,
-        validation_status,
+        *,
         products(id, name, category, subcategory, default_unit)
       `)
       .eq('validation_status', 'approved')
@@ -223,8 +254,6 @@ export default function Ranking() {
       request = request.gte('purchase_date', since.toISOString().slice(0, 10))
     }
 
-    if (sector) request = request.eq('sector', sector)
-
     const { data, error: fetchError } = await request
 
     if (fetchError) {
@@ -235,16 +264,16 @@ export default function Ranking() {
       return
     }
 
-    const nextRows = data || []
+    const nextRows = filterRowsByZone(data || [], zoneMode, currentZone)
     setRows(nextRows)
     setResults(buildRanking(nextRows, query))
     setLoading(false)
-  }, [period, sector, query])
+  }, [period, zoneMode, currentZone?.commune, currentZone?.lat, currentZone?.lng, query])
 
   useEffect(() => {
     loadRows()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period, sector])
+  }, [period, zoneMode, currentZone?.commune, currentZone?.lat, currentZone?.lng])
 
   function handleSearch(e) {
     e.preventDefault()
@@ -302,9 +331,10 @@ export default function Ranking() {
         </div>
 
         <div className="grid grid-cols-2 gap-2">
-          <select value={sector} onChange={e => setSector(e.target.value)} className="input-field">
-            <option value="">Todos los sectores</option>
-            {SECTORES_RANCAGUA.map(s => <option key={s} value={s}>{s}</option>)}
+          <select value={zoneMode} onChange={e => setZoneMode(e.target.value)} className="input-field">
+            <option value="nearby">Cerca de mi</option>
+            <option value="commune">Mi comuna</option>
+            <option value="all">Todas las zonas</option>
           </select>
 
           <select value={period} onChange={e => setPeriod(e.target.value)} className="input-field">
@@ -313,6 +343,7 @@ export default function Ranking() {
             <option value="all">Todos</option>
           </select>
         </div>
+        <p className="text-xs font-semibold text-slate-400">Zona: {zoneFilterLabel(zoneMode, currentZone)}</p>
       </form>
 
       {error && <div className="card border-danger-200 bg-danger-50/40 mb-4"><p className="text-sm text-danger-600">No se pudo cargar el ranking: {error}</p></div>}
@@ -321,7 +352,7 @@ export default function Ranking() {
       {!loading && searched && results.length === 0 && (
         <div className="card text-center py-10">
           <p className="text-3xl mb-2">🔍</p>
-          <p className="text-slate-500 text-sm">Sin resultados comparables. Intenta con otro producto, sector o período.</p>
+          <p className="text-slate-500 text-sm">Sin resultados comparables. Intenta con otro producto, zona o periodo.</p>
         </div>
       )}
 

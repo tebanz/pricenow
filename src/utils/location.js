@@ -25,3 +25,61 @@ export function formatDistance(meters) {
   if (meters < 1000) return `${meters} m`
   return `${(meters / 1000).toFixed(1).replace('.0', '')} km`
 }
+
+export const PRICE_NOW_ZONE_KEY = 'pricenow_current_zone'
+export const PRICE_NOW_ZONE_EVENT = 'pricenow-zone-change'
+
+export function zoneDisplayName(zone) {
+  return zone?.commune || zone?.municipality || zone?.city || zone?.region || 'Chile'
+}
+
+export function zoneSubtitle(zone) {
+  const commune = zoneDisplayName(zone)
+  const region = zone?.region || zone?.state
+  if (commune && region && commune !== region) return `${commune}, ${region}`
+  return commune
+}
+
+export function getStoredZone() {
+  try {
+    const raw = localStorage.getItem(PRICE_NOW_ZONE_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+export function setStoredZone(zone) {
+  if (!zone) return null
+  const next = {
+    ...zone,
+    updated_at: new Date().toISOString(),
+  }
+  localStorage.setItem(PRICE_NOW_ZONE_KEY, JSON.stringify(next))
+  window.dispatchEvent(new CustomEvent(PRICE_NOW_ZONE_EVENT, { detail: next }))
+  return next
+}
+
+export async function reverseGeocode(lat, lng) {
+  if (!isValidCoordinate(lat, lng)) return null
+  const params = new URLSearchParams({ lat: String(lat), lng: String(lng) })
+  const response = await fetch(`/api/reverse-geocode?${params.toString()}`)
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data.error || 'No se pudo detectar la comuna.')
+  return data.zone || null
+}
+
+export function rowCommune(row = {}) {
+  return row.commune || row.city || row.sector || ''
+}
+
+export function sameCommune(a = '', b = '') {
+  const normalize = value => value
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+  return normalize(a) && normalize(a) === normalize(b)
+}

@@ -3,8 +3,9 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import {
-  calcUnitPrice, formatUnitPrice, SECTORES_RANCAGUA, UNIDADES
+  calcUnitPrice, formatUnitPrice, UNIDADES
 } from '../utils/priceCalc'
+import { getStoredZone, reverseGeocode, setStoredZone, zoneSubtitle } from '../utils/location'
 
 const EMPTY_FORM = {
   product_name: '',
@@ -316,6 +317,7 @@ export default function AddPrice() {
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
   const [location, setLocation] = useState(null)
+  const [locationZone, setLocationZone] = useState(() => getStoredZone())
   const [locationLoading, setLocationLoading] = useState(false)
   const [osmPlaces, setOsmPlaces] = useState([])
   const [osmLoading, setOsmLoading] = useState(false)
@@ -328,7 +330,7 @@ export default function AddPrice() {
   useEffect(() => {
     supabase
       .from('stores')
-      .select('id, name, sector, address, latitude, longitude')
+      .select('*')
       .eq('is_active', true)
       .order('name')
       .then(({ data }) => { if (data) setStores(data) })
@@ -385,6 +387,12 @@ export default function AddPrice() {
     })
     .sort((a, b) => `${a.category || ''} ${a.name}`.localeCompare(`${b.category || ''} ${b.name}`))
     .slice(0, 80)
+
+  const availableSectors = Array.from(new Set([
+    locationZone?.commune,
+    locationZone?.city,
+    ...stores.map(store => store.commune || store.sector).filter(Boolean),
+  ].filter(Boolean))).sort((a, b) => a.localeCompare(b, 'es'))
 
   function handleChange(e) {
     const { name, value } = e.target
@@ -481,6 +489,15 @@ export default function AddPrice() {
         }
         setLocation(nextLocation)
         setLocationLoading(false)
+        reverseGeocode(nextLocation.lat, nextLocation.lng)
+          .then(zone => {
+            if (zone) {
+              const savedZone = setStoredZone({ ...zone, lat: nextLocation.lat, lng: nextLocation.lng, source: 'gps' })
+              setLocationZone(savedZone)
+              setForm(prev => prev.sector ? prev : { ...prev, sector: savedZone?.commune || savedZone?.city || '' })
+            }
+          })
+          .catch(err => console.warn('PriceNow reverse geocode for report failed:', err))
       },
       () => {
         setError('No se pudo obtener la ubicación. Revisa los permisos del navegador.')
@@ -496,6 +513,7 @@ export default function AddPrice() {
 
   function clearLocation() {
     setLocation(null)
+    setLocationZone(null)
     setOsmPlaces([])
     setOsmSearched(false)
   }
@@ -573,6 +591,24 @@ export default function AddPrice() {
     return null
   }
 
+  async function insertPriceEntry(payload) {
+    let nextPayload = { ...payload }
+    let result = null
+    const optionalColumns = ['city', 'commune', 'region']
+
+    for (let attempt = 0; attempt < optionalColumns.length + 1; attempt += 1) {
+      result = await supabase.from('price_entries').insert(nextPayload)
+      if (!result.error) return result
+
+      const missingColumn = optionalColumns.find(column => nextPayload[column] !== undefined && new RegExp(column, 'i').test(result.error.message || ''))
+      if (!missingColumn) return result
+      const { [missingColumn]: _removed, ...fallbackPayload } = nextPayload
+      nextPayload = fallbackPayload
+    }
+
+    return result
+  }
+
   async function handleSubmit() {
     const err = validate()
     if (err) { setError(err); return }
@@ -606,7 +642,8 @@ export default function AddPrice() {
       return
     }
 
-    const { error: insertErr } = await supabase.from('price_entries').insert({
+    const zone = locationZone || getStoredZone()
+    const { error: insertErr } = await insertPriceEntry({
       user_id: user.id,
       product_id: resolvedProduct?.id ?? null,
       product_name: resolvedProduct?.name || form.product_name.trim(),
@@ -618,6 +655,9 @@ export default function AddPrice() {
       store_name: form.store_name.trim(),
       store_id: form._store_id ?? null,
       sector: form.sector,
+      city: zone?.city || zone?.commune || null,
+      commune: zone?.commune || null,
+      region: zone?.region || zone?.state || null,
       purchase_date: form.purchase_date,
       notes: form.notes.trim() || null,
       receipt_photo_url,
@@ -874,13 +914,19 @@ export default function AddPrice() {
         )}
 
         <div>
-          <label className="input-label">Sector / población de Rancagua <span className="text-danger-500">*</span></label>
-          <select name="sector" value={form.sector} onChange={handleChange} className="input-field">
-            <option value="" disabled>Seleccionar sector…</option>
-            {SECTORES_RANCAGUA.map(s => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
+          <label className="input-label">Comuna / sector <span className="text-danger-500">*</span></label>
+          <input
+            name="sector"
+            list="pricenow-zones"
+            value={form.sector}
+            onChange={handleChange}
+            className="input-field"
+            placeholder="Ej: Providencia, Santiago, Rancagua"
+          />
+          <datalist id="pricenow-zones">
+            {availableSectors.map(s => <option key={s} value={s} />)}
+          </datalist>
+          {locationZone?.commune && <p className="mt-1 text-xs font-semibold text-brand-600">Zona detectada: {zoneSubtitle(locationZone)}</p>}
         </div>
 
         <div>

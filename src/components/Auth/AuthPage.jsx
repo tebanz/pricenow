@@ -119,7 +119,7 @@ export default function AuthPage() {
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-lg font-black text-brand-600">₱</div>
               <div>
                 <p className="font-black leading-tight">PriceNow</p>
-                <p className="text-[11px] font-medium text-white/60">Rancagua</p>
+                <p className="text-[11px] font-medium text-white/60">PriceNow por KairosNow</p>
               </div>
             </div>
 
@@ -131,7 +131,7 @@ export default function AuthPage() {
                 Encuentra mejores precios cerca de ti.
               </h1>
               <p className="mt-5 max-w-lg text-base leading-relaxed text-white/70 sm:text-lg">
-                Compara precios reales, reporta compras verificables, gana puntos y descubre beneficios locales en Rancagua.
+                Compara precios reales, reporta compras verificables y descubre datos locales en tu comuna.
               </p>
             </div>
           </div>
@@ -139,7 +139,7 @@ export default function AuthPage() {
           <div className="mt-10 grid gap-3 sm:grid-cols-3 lg:max-w-2xl">
             <FeatureCard icon="📍" title="Cerca de ti" description="Usa tu ubicación con permiso para ordenar negocios y precios cercanos." />
             <FeatureCard icon="📊" title="Datos claros" description="Ranking y reportes por unidad estándar, kg, litro o unidad." />
-            <FeatureCard icon="🎁" title="Beneficios" description="Suma puntos con aportes aprobados y canjéalos en descuentos." />
+            <FeatureCard icon="🎁" title="Beneficios" description="Modulo de cupones y descuentos en preparacion." />
           </div>
         </div>
 
@@ -152,13 +152,13 @@ export default function AuthPage() {
                 </h2>
                 <p className="mt-1 text-sm text-slate-500">
                   {mode === 'login'
-                    ? 'Ingresa para aportar, comparar y usar beneficios.'
+                    ? 'Ingresa para aportar y comparar precios locales.'
                     : 'Únete a la comunidad que mide precios locales.'}
                 </p>
               </div>
               <div className="hidden rounded-2xl bg-brand-50 px-3 py-2 text-center sm:block">
                 <p className="text-xs font-bold text-brand-600">Beta</p>
-                <p className="text-[10px] text-slate-400">Rancagua</p>
+                <p className="text-[10px] text-slate-400">Chile</p>
               </div>
             </div>
 
@@ -189,7 +189,7 @@ export default function AuthPage() {
                   <input
                     name="username"
                     type="text"
-                    placeholder="ej: vecino_rancagua"
+                    placeholder="ej: vecino_santiago"
                     value={form.username}
                     onChange={handleChange}
                     maxLength={30}
