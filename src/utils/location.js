@@ -40,6 +40,24 @@ export function zoneSubtitle(zone) {
   return commune
 }
 
+export function normalizeZoneName(value = '') {
+  return value
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+export function zoneCommune(zone = {}) {
+  return zone?.commune || zone?.municipality || zone?.city || ''
+}
+
+export function isManualPreferredZone(zone = {}) {
+  return Boolean(zone?.is_preferred && (zone?.source === 'manual' || zone?.preference_source === 'manual'))
+}
+
 export function getStoredZone() {
   try {
     const raw = localStorage.getItem(PRICE_NOW_ZONE_KEY)
@@ -53,6 +71,8 @@ export function setStoredZone(zone) {
   if (!zone) return null
   const next = {
     ...zone,
+    is_preferred: zone.is_preferred ?? true,
+    confirmed: zone.confirmed ?? true,
     updated_at: new Date().toISOString(),
   }
   localStorage.setItem(PRICE_NOW_ZONE_KEY, JSON.stringify(next))
@@ -74,12 +94,5 @@ export function rowCommune(row = {}) {
 }
 
 export function sameCommune(a = '', b = '') {
-  const normalize = value => value
-    .toString()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-  return normalize(a) && normalize(a) === normalize(b)
+  return normalizeZoneName(a) && normalizeZoneName(a) === normalizeZoneName(b)
 }

@@ -3,7 +3,19 @@ import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { dedupePlaces, isDuplicatePlace, placeToStore } from '../utils/geoPlaces'
-import { formatDistance, getDistanceMeters, getStoredZone, isValidCoordinate, reverseGeocode, setStoredZone, zoneSubtitle } from '../utils/location'
+import {
+  formatDistance,
+  getDistanceMeters,
+  getStoredZone,
+  isManualPreferredZone,
+  isValidCoordinate,
+  reverseGeocode,
+  sameCommune,
+  setStoredZone,
+  zoneCommune,
+  zoneDisplayName,
+  zoneSubtitle,
+} from '../utils/location'
 import { normalizeName } from '../utils/normalize'
 
 const NEARBY_RADIUS_M = 8000
@@ -51,6 +63,8 @@ export default function Home() {
   const [zone, setZone] = useState(() => getStoredZone())
   const [manualZone, setManualZone] = useState(() => ({ region: getStoredZone()?.region || '', commune: getStoredZone()?.commune || '' }))
   const [zoneSaving, setZoneSaving] = useState(false)
+  const [zonePrompt, setZonePrompt] = useState(null)
+  const [zoneChooserOpen, setZoneChooserOpen] = useState(false)
 
   async function load() {
     const start = new Date()
@@ -90,6 +104,25 @@ export default function Home() {
   }
 
   useEffect(() => { load() }, [user?.id])
+
+  useEffect(() => {
+    if (zone || !profile?.preferred_commune) return
+
+    const saved = setStoredZone({
+      country: 'Chile',
+      region: profile.preferred_region || '',
+      city: profile.preferred_city || profile.preferred_commune,
+      commune: profile.preferred_commune,
+      lat: profile.preferred_latitude || null,
+      lng: profile.preferred_longitude || null,
+      source: 'profile',
+      preference_source: 'profile',
+      is_preferred: true,
+      confirmed: true,
+    })
+    setZone(saved)
+    setManualZone({ region: saved?.region || '', commune: saved?.commune || '' })
+  }, [profile, zone])
 
   async function fetchProviderNearby(origin, provider, radius) {
     const params = new URLSearchParams({
@@ -137,24 +170,32 @@ export default function Home() {
     setOsmStatus({ state: lastError ? 'error' : 'empty', radius: SEARCH_RADII_M[SEARCH_RADII_M.length - 1], provider: null })
   }
 
-  async function savePreferredZone(nextZone) {
-    const saved = setStoredZone(nextZone)
+  async function savePreferredZone(nextZone, options = {}) {
+    const source = options.source || nextZone.source || 'gps'
+    const saved = setStoredZone({
+      ...nextZone,
+      source,
+      preference_source: options.preferenceSource || nextZone.preference_source || source,
+      is_preferred: true,
+      confirmed: true,
+    })
     setZone(saved)
     setManualZone({ region: saved?.region || '', commune: saved?.commune || '' })
 
-    if (!user?.id || !nextZone?.commune) return
+    if (!user?.id || !saved?.commune) return saved
     setZoneSaving(true)
     const payload = {
-      preferred_commune: nextZone.commune,
-      preferred_region: nextZone.region || nextZone.state || null,
-      preferred_latitude: nextZone.lat || null,
-      preferred_longitude: nextZone.lng || null,
+      preferred_commune: saved.commune,
+      preferred_region: saved.region || saved.state || null,
+      preferred_city: saved.city || saved.commune || null,
+      preferred_latitude: saved.lat || null,
+      preferred_longitude: saved.lng || null,
       updated_at: new Date().toISOString(),
     }
 
     let nextPayload = { ...payload }
     let result = null
-    const optionalColumns = ['preferred_region', 'preferred_latitude', 'preferred_longitude']
+    const optionalColumns = ['preferred_commune', 'preferred_region', 'preferred_city', 'preferred_latitude', 'preferred_longitude']
 
     for (let attempt = 0; attempt < optionalColumns.length + 1; attempt += 1) {
       result = await supabase.from('profiles').update(nextPayload).eq('id', user.id)
@@ -169,19 +210,83 @@ export default function Home() {
     }
     if (result.error) console.error('PriceNow preferred zone save failed:', result.error)
     setZoneSaving(false)
+    return saved
   }
 
   async function chooseManualZone(event) {
     event.preventDefault()
     if (!manualZone.commune.trim()) return
-    await savePreferredZone({
+    const saved = await savePreferredZone({
       country: 'Chile',
       region: manualZone.region.trim(),
       city: manualZone.commune.trim(),
       commune: manualZone.commune.trim(),
       source: 'manual',
+      preference_source: 'manual',
+    }, { source: 'manual', preferenceSource: 'manual' })
+    setZonePrompt(null)
+    setZoneChooserOpen(false)
+    setLocalMessage({ type: 'ok', text: `Zona preferida actualizada: ${zoneDisplayName(saved)}.` })
+  }
+
+  async function handleDetectedZone(detectedZone, nextPosition) {
+    if (!detectedZone || !zoneCommune(detectedZone)) {
+      setLocalMessage({ type: 'warning', text: 'No pudimos detectar tu comuna. Mantuvimos tu zona actual.' })
+      return
+    }
+
+    const detected = {
+      ...detectedZone,
+      lat: nextPosition.lat,
+      lng: nextPosition.lng,
+      source: 'gps',
+      preference_source: 'gps',
+      is_preferred: true,
+      confirmed: true,
+    }
+    const currentZone = zone || getStoredZone()
+
+    if (
+      isManualPreferredZone(currentZone) &&
+      zoneCommune(currentZone) &&
+      !sameCommune(zoneCommune(currentZone), zoneCommune(detected))
+    ) {
+      setLocalMessage(null)
+      setZonePrompt({
+        type: 'conflict',
+        detectedZone: detected,
+        previousZone: currentZone,
+        text: `Detectamos que estas en ${zoneDisplayName(detected)}. ¿Quieres cambiar tu zona desde ${zoneDisplayName(currentZone)}?`,
+      })
+      return
+    }
+
+    const saved = await savePreferredZone(detected, { source: 'gps', preferenceSource: 'gps' })
+    setLocalMessage(null)
+    setZonePrompt({
+      type: 'updated',
+      detectedZone: saved,
+      text: `Zona actualizada a ${zoneDisplayName(saved)}.`,
     })
-    setLocalMessage({ type: 'ok', text: `Zona preferida actualizada: ${manualZone.commune.trim()}.` })
+  }
+
+  function acceptZonePrompt() {
+    if (zonePrompt?.type === 'conflict') {
+      setLocalMessage({ type: 'ok', text: `Mantuvimos tu zona en ${zoneDisplayName(zonePrompt.previousZone)}.` })
+    }
+    setZonePrompt(null)
+  }
+
+  async function changeZoneFromPrompt() {
+    if (zonePrompt?.type === 'conflict' && zonePrompt.detectedZone) {
+      const saved = await savePreferredZone(zonePrompt.detectedZone, { source: 'gps', preferenceSource: 'gps' })
+      setLocalMessage({ type: 'ok', text: `Zona actualizada a ${zoneDisplayName(saved)}.` })
+      setZonePrompt(null)
+      return
+    }
+
+    setZonePrompt(null)
+    setZoneChooserOpen(true)
   }
 
   function askLocation() {
@@ -201,12 +306,11 @@ export default function Home() {
         setLocationStatus('ok')
         fetchMapNearby(nextPosition)
         reverseGeocode(nextPosition.lat, nextPosition.lng)
-          .then(detectedZone => {
-            if (detectedZone) {
-              savePreferredZone({ ...detectedZone, lat: nextPosition.lat, lng: nextPosition.lng, source: 'gps' })
-            }
+          .then(detectedZone => handleDetectedZone(detectedZone, nextPosition))
+          .catch(err => {
+            console.error('PriceNow reverse geocode failed:', err)
+            setLocalMessage({ type: 'warning', text: 'No pudimos detectar tu comuna. Mantuvimos tu zona actual.' })
           })
-          .catch(err => console.error('PriceNow reverse geocode failed:', err))
       },
       () => setLocationStatus('error'),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
@@ -344,6 +448,12 @@ export default function Home() {
     }
   }, [nearestSector, position])
 
+  const localMessageClass = localMessage?.type === 'error'
+    ? 'bg-red-50 text-red-700'
+    : localMessage?.type === 'warning'
+      ? 'bg-amber-50 text-amber-800'
+      : 'bg-emerald-50 text-emerald-700'
+
   return (
     <div className="space-y-5 pb-32">
       <section className="relative overflow-hidden rounded-b-[2rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 px-5 pb-7 pt-7 text-white shadow-xl">
@@ -379,7 +489,16 @@ export default function Home() {
             Estas en {zoneSubtitle(zone)}.
           </p>
         )}
-        {localMessage && <p className={`mt-3 rounded-2xl px-3 py-2 text-sm font-semibold ${localMessage.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{localMessage.text}</p>}
+        {localMessage && <p className={`mt-3 rounded-2xl px-3 py-2 text-sm font-semibold ${localMessageClass}`}>{localMessage.text}</p>}
+        {zonePrompt && (
+          <div className="mt-3 rounded-2xl border border-blue-100 bg-blue-50 p-3">
+            <p className="text-sm font-semibold text-blue-800">{zonePrompt.text}</p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button type="button" onClick={acceptZonePrompt} className="rounded-xl bg-white px-3 py-2 text-sm font-black text-blue-700 shadow-sm">Correcto</button>
+              <button type="button" onClick={changeZoneFromPrompt} disabled={zoneSaving} className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-black text-white disabled:opacity-50">{zoneSaving ? 'Guardando...' : 'Cambiar zona'}</button>
+            </div>
+          </div>
+        )}
         {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicacion. Puedes seguir usando PriceNow sin compartirla.</p>}
         {sectorDetection?.type === 'ok' && <p className="mt-3 rounded-2xl bg-blue-50 px-3 py-2 text-sm text-blue-700">Sector probable: <b>{sectorDetection.name}</b>.</p>}
         {sectorDetection?.type === 'warning' && <p className="mt-3 rounded-2xl bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">{sectorDetection.text}</p>}
@@ -390,7 +509,7 @@ export default function Home() {
           </p>
         )}
 
-        <details className="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
+        <details open={zoneChooserOpen} onToggle={event => setZoneChooserOpen(event.currentTarget.open)} className="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
           <summary className="cursor-pointer text-sm font-black text-slate-800">Cambiar zona</summary>
           <form onSubmit={chooseManualZone} className="mt-3 grid gap-2">
             <input value={manualZone.region} onChange={e => setManualZone({ ...manualZone, region: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Region, ej: Metropolitana" />

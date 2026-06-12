@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import {
   calcUnitPrice, formatUnitPrice, UNIDADES
 } from '../utils/priceCalc'
-import { getStoredZone, reverseGeocode, setStoredZone, zoneSubtitle } from '../utils/location'
+import { getStoredZone, isManualPreferredZone, reverseGeocode, sameCommune, setStoredZone, zoneCommune, zoneSubtitle } from '../utils/location'
 
 const EMPTY_FORM = {
   product_name: '',
@@ -492,7 +492,10 @@ export default function AddPrice() {
         reverseGeocode(nextLocation.lat, nextLocation.lng)
           .then(zone => {
             if (zone) {
-              const savedZone = setStoredZone({ ...zone, lat: nextLocation.lat, lng: nextLocation.lng, source: 'gps' })
+              const detectedZone = { ...zone, lat: nextLocation.lat, lng: nextLocation.lng, source: 'gps', preference_source: 'gps', is_preferred: true, confirmed: true }
+              const currentZone = getStoredZone()
+              const keepManualZone = isManualPreferredZone(currentZone) && zoneCommune(currentZone) && !sameCommune(zoneCommune(currentZone), zoneCommune(detectedZone))
+              const savedZone = keepManualZone ? detectedZone : setStoredZone(detectedZone)
               setLocationZone(savedZone)
               setForm(prev => prev.sector ? prev : { ...prev, sector: savedZone?.commune || savedZone?.city || '' })
             }
