@@ -12,6 +12,7 @@ import DataQuality from './pages/DataQuality'
 import BusinessPartners from './pages/BusinessPartners'
 import FavoritesAlerts from './pages/FavoritesAlerts'
 import LocalMapAdmin from './pages/LocalMapAdmin'
+import Benefits from './pages/Benefits'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -40,7 +41,7 @@ export default function App() {
         <Route path="add" element={<AddPrice />} />
         <Route path="ranking" element={<Ranking />} />
         <Route path="report" element={<Navigate to="/ranking?tab=reportes" replace />} />
-        <Route path="benefits" element={<Navigate to="/profile?tab=beneficios" replace />} />
+        <Route path="benefits" element={<Benefits />} />
         <Route path="favorites" element={<FavoritesAlerts />} />
         <Route path="profile" element={<Profile />} />
         <Route path="validate" element={<ValidatorRoute><Validate /></ValidatorRoute>} />

@@ -21,7 +21,7 @@ export default function Layout() {
             <BrandMark />
             <div className="min-w-0">
               <span className="block truncate text-lg font-black leading-none tracking-tight">PriceNow</span>
-              <p className="text-[11px] font-semibold leading-none text-white/70">Precios reales cerca de ti</p>
+              <p className="text-[11px] font-semibold leading-none text-white/70">Una app del ecosistema KairosNow</p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-3">

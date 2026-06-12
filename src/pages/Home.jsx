@@ -199,7 +199,7 @@ export default function Home() {
         <div className="relative mt-6 grid grid-cols-3 gap-2">
           <Link to="/add" className="rounded-2xl bg-white px-4 py-3 text-center text-sm font-black text-blue-700 shadow-sm">Reportar</Link>
           <Link to="/ranking" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Precios</Link>
-          <Link to="/profile?tab=beneficios" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Beneficios</Link>
+          <Link to="/benefits" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Beneficios<br /><span className="text-[10px] font-bold text-white/70">Proximamente</span></Link>
         </div>
       </section>
 
@@ -290,11 +290,11 @@ export default function Home() {
 
       <section className="mx-4 rounded-[2rem] border border-blue-100 bg-white p-4 shadow-sm">
         <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">KairosNow</p>
-        <p className="mt-2 text-sm leading-relaxed text-slate-600">PriceNow forma parte de KairosNow, un ecosistema de herramientas para precios, negocios y finanzas.</p>
+        <p className="mt-2 text-sm leading-relaxed text-slate-600">PriceNow forma parte de KairosNow, un ecosistema de herramientas para precios, negocios, finanzas y comunidad local.</p>
         <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black">
-          <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">PriceNow<br /><span className="font-semibold">activo</span></div>
-          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">LedgerNow<br /><span className="font-semibold">próximamente</span></div>
-          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">WalleNow<br /><span className="font-semibold">próximamente</span></div>
+          <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">PriceNow<br /><span className="font-semibold">Activo</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">LedgerNow<br /><span className="font-semibold">Proximamente</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">WalleNow<br /><span className="font-semibold">Proximamente</span></div>
         </div>
       </section>
 

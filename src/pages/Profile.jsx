@@ -497,7 +497,7 @@ export default function Profile() {
 
   const tabs = [
     ['resumen', 'Resumen'],
-    ['beneficios', 'Beneficios'],
+    ['beneficios', 'Beneficios · Prox.'],
     ['preferencias', 'Preferencias'],
     ['configuracion', 'Configuración'],
   ]
@@ -507,7 +507,7 @@ export default function Profile() {
       <div>
         <h2 className="text-xl font-bold text-slate-900">Mi perfil</h2>
         <p className="text-sm text-slate-500 mt-0.5">
-          Gestiona tu identidad, puntos, beneficios y preferencias de PriceNow.
+          Gestiona tu identidad, puntos, futuros beneficios y preferencias de PriceNow.
         </p>
       </div>
 
@@ -563,10 +563,22 @@ export default function Profile() {
               </div>
               <ProgressBar value={nextLevelProgress} max={100} />
               <p className="mt-2 text-[11px] text-slate-500">
-                Sube de nivel con aportes aprobados y usa tus puntos en beneficios.
+                Sube de nivel con aportes aprobados y acumula puntos para futuros beneficios.
               </p>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="card border-blue-100">
+        <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">KairosNow</p>
+        <p className="mt-2 text-sm leading-relaxed text-slate-600">
+          PriceNow forma parte de KairosNow, un ecosistema de herramientas para precios, negocios, finanzas y comunidad local.
+        </p>
+        <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black">
+          <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">PriceNow<br /><span className="font-semibold">Activo</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">LedgerNow<br /><span className="font-semibold">Proximamente</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">WalleNow<br /><span className="font-semibold">Proximamente</span></div>
         </div>
       </section>
 
@@ -633,14 +645,14 @@ export default function Profile() {
 
           <section className="card">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-bold text-slate-900">Beneficios recientes</h3>
-              <button type="button" onClick={() => changeTab('beneficios')} className="text-xs font-semibold text-brand-500">Ver beneficios</button>
+              <h3 className="font-bold text-slate-900">Beneficios y cupones</h3>
+              <button type="button" onClick={() => changeTab('beneficios')} className="text-xs font-semibold text-brand-500">Ver modulo futuro</button>
             </div>
-            {redemptions.length === 0 ? (
+            {true ? (
               <div className="rounded-2xl bg-brand-50 border border-brand-100 p-4">
-                <p className="font-bold text-brand-700 text-sm">Canjea puntos</p>
+                <p className="font-bold text-brand-700 text-sm">Proximamente</p>
                 <p className="text-xs text-brand-700/70 mt-1">
-                  Tus cupones canjeados aparecerán aquí. Los beneficios disponibles están en esta misma sección de Perfil.
+                  Muy pronto podras canjear puntos por descuentos, cupones y beneficios en negocios asociados.
                 </p>
               </div>
             ) : (
