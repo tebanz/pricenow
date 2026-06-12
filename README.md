@@ -164,6 +164,14 @@ cp .env.example .env
 # Editar .env con tus credenciales de Supabase
 ```
 
+Para la busqueda estable de negocios cercanos, agrega tambien:
+
+```bash
+GEOAPIFY_API_KEY=mi_clave
+```
+
+En Vercel, crea la misma variable `GEOAPIFY_API_KEY` en Project Settings > Environment Variables. No modifiques `VITE_SUPABASE_URL` ni `VITE_SUPABASE_ANON_KEY`.
+
 **4. Ejecutar en desarrollo**
 ```bash
 npm run dev

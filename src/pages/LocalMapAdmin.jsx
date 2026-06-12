@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
+import { mapProviderType } from '../utils/geoPlaces'
+import { formatDistance, getDistanceMeters, isValidCoordinate } from '../utils/location'
+import { normalizeName } from '../utils/normalize'
 
 const STORE_TYPES = ['supermercado', 'minimarket', 'almacen', 'panaderia', 'carniceria', 'verduleria', 'feria', 'mayorista', 'farmacia', 'otro']
-const SEARCH_TYPES = ['all', ...STORE_TYPES]
+const SEARCH_TYPES = ['all', 'supermercado', 'minimarket', 'panaderia', 'farmacia', 'otros']
 const MAX_SECTOR_DETECTION_M = 50000
 
 const EMPTY_STORE = { name: '', chain: '', type: 'supermercado', sector: '', address: '', latitude: '', longitude: '', is_verified: true, location_source: 'admin' }
@@ -12,19 +15,7 @@ const EMPTY_SEARCH = { name: '', commune: 'Rancagua', address: '', type: 'superm
 const EMPTY_IMPORT = { commune: 'Rancagua', type: 'supermercado', sector: '' }
 const EMPTY_NEARBY_SEARCH = { radius_m: '1500', type: 'all' }
 
-function normalize(text = '') {
-  return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-}
-
-function isValidCoordinate(lat, lng) {
-  if (lat === null || lat === undefined || lng === null || lng === undefined) return false
-  if (String(lat).trim() === '' || String(lng).trim() === '') return false
-  const latitude = Number(lat)
-  const longitude = Number(lng)
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false
-  if (latitude === 0 && longitude === 0) return false
-  return Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
-}
+const normalize = normalizeName
 
 function hasCoords(row) {
   return isValidCoordinate(row?.latitude, row?.longitude)
@@ -46,34 +37,12 @@ function mapsUrl(lat, lng) {
 }
 
 function distanceMeters(a, b) {
-  if (!isValidCoordinate(a?.lat, a?.lng) || !isValidCoordinate(b?.lat, b?.lng)) return null
-  const R = 6371000
-  const toRad = value => Number(value) * Math.PI / 180
-  const dLat = toRad(Number(b.lat) - Number(a.lat))
-  const dLng = toRad(Number(b.lng) - Number(a.lng))
-  const lat1 = toRad(a.lat)
-  const lat2 = toRad(b.lat)
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
-  return Math.round(2 * R * Math.asin(Math.sqrt(h)))
-}
-
-function formatDistance(meters) {
-  if (meters == null) return 'Sin distancia'
-  if (meters < 1000) return `${meters} m`
-  return `${(meters / 1000).toFixed(1).replace('.0', '')} km`
+  return getDistanceMeters(a?.lat, a?.lng, b?.lat, b?.lng)
 }
 
 function mapOsmType(type = '') {
-  const key = normalize(type)
-  if (key.includes('supermarket')) return 'supermercado'
-  if (key.includes('wholesale')) return 'mayorista'
-  if (key.includes('convenience')) return 'minimarket'
-  if (key.includes('bakery')) return 'panaderia'
-  if (key.includes('butcher')) return 'carniceria'
-  if (key.includes('greengrocer')) return 'verduleria'
-  if (key.includes('marketplace')) return 'feria'
-  if (key.includes('pharmacy') || key.includes('chemist')) return 'farmacia'
-  return STORE_TYPES.includes(key) ? key : 'otro'
+  const mapped = mapProviderType(type)
+  return STORE_TYPES.includes(mapped) ? mapped : 'otro'
 }
 
 function FieldHint({ children }) {
@@ -115,6 +84,8 @@ function duplicateForCandidate(candidate, stores, ignoreId = null) {
 function CandidateCard({ candidate, duplicate, onSelect, onSave, saving }) {
   const url = mapsUrl(candidate.lat, candidate.lng)
   const closeDistance = candidate.distance_km != null && Number(candidate.distance_km) <= 50
+  const sourceLabel = candidate.source === 'geoapify' ? 'Geoapify' : candidate.source?.includes('osm') || candidate.source?.includes('openstreetmap') ? 'OSM' : 'Mapa'
+  const distanceLabel = candidate.distance_m != null ? formatDistance(candidate.distance_m) : closeDistance ? `${Number(candidate.distance_km).toFixed(1)} km` : null
   return (
     <div className="rounded-2xl border border-slate-100 bg-white p-3">
       <div className="flex items-start justify-between gap-3">
@@ -123,8 +94,8 @@ function CandidateCard({ candidate, duplicate, onSelect, onSave, saving }) {
             <p className="font-bold text-slate-900">{candidate.name}</p>
             <StatusPill tone={duplicate ? 'amber' : 'green'}>{duplicate ? 'Posible duplicado' : 'Candidato nuevo'}</StatusPill>
           </div>
-          <p className="mt-1 text-xs text-slate-500">{candidate.address || 'Sin direccion en OSM'} - {mapOsmType(candidate.type)}</p>
-          <p className="mt-1 text-xs text-slate-400">{Number(candidate.lat).toFixed(6)}, {Number(candidate.lng).toFixed(6)}{closeDistance ? ` - ${Number(candidate.distance_km).toFixed(1)} km aprox.` : ''}</p>
+          <p className="mt-1 text-xs text-slate-500">{candidate.address || 'Sin direccion'} - {mapOsmType(candidate.type)}</p>
+          <p className="mt-1 text-xs text-slate-400">{sourceLabel}{distanceLabel ? ` - ${distanceLabel}` : ''}</p>
           {duplicate && <p className="mt-1 text-xs font-semibold text-amber-700">Coincide con: {duplicate.name}</p>}
         </div>
         <div className="flex shrink-0 flex-col gap-2">
@@ -163,6 +134,7 @@ export default function LocalMapAdmin() {
   const [nearbyForm, setNearbyForm] = useState(EMPTY_NEARBY_SEARCH)
   const [nearbyCandidates, setNearbyCandidates] = useState([])
   const [nearbyLoading, setNearbyLoading] = useState(false)
+  const [externalVerified, setExternalVerified] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -267,6 +239,39 @@ export default function LocalMapAdmin() {
     }
   }
 
+  async function fetchPlacesProvider(params, provider) {
+    const endpoint = provider === 'geoapify' ? '/api/nearby-geoapify' : '/api/nearby-osm'
+    const response = await fetch(`${endpoint}?${params.toString()}`)
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || `No se pudo consultar ${provider}.`)
+    return {
+      ...data,
+      provider,
+      places: (data.places || [])
+        .filter(place => isValidCoordinate(place.lat, place.lng))
+        .map(place => ({ ...place, source: provider })),
+    }
+  }
+
+  async function fetchNearbyWithFallback(params, radius) {
+    let lastError = null
+    for (const provider of ['geoapify', 'osm']) {
+      try {
+        const data = await fetchPlacesProvider(params, provider)
+        const places = data.places.filter(place => {
+          if (place.distance_m != null) return Number(place.distance_m) <= radius + 50
+          if (place.distance_km != null) return Number(place.distance_km) * 1000 <= radius + 50
+          return true
+        })
+        if (places.length > 0) return { places, provider }
+      } catch (err) {
+        lastError = err
+        console.error(`PriceNow ${provider} admin search failed:`, err)
+      }
+    }
+    return { places: [], provider: null, error: lastError }
+  }
+
   async function searchOsmBusinesses(event) {
     event.preventDefault()
     if (!searchForm.name.trim() && !searchForm.address.trim() && !searchForm.commune.trim()) {
@@ -315,11 +320,11 @@ export default function LocalMapAdmin() {
         type: nearbyForm.type,
         limit: '24',
       })
-      const data = await fetchOsm(params)
       const radius = Number(nearbyForm.radius_m)
-      const places = data.places.filter(place => place.distance_km == null || Number(place.distance_km) * 1000 <= radius + 50)
+      const data = await fetchNearbyWithFallback(params, radius)
+      const places = data.places
       setNearbyCandidates(places)
-      setMessage({ type: places.length ? 'ok' : 'error', text: places.length ? 'Resultados cercanos encontrados. Revisa duplicados antes de guardar.' : 'No encontramos negocios cercanos en ese radio.' })
+      setMessage({ type: places.length ? 'ok' : 'error', text: places.length ? `Resultados de ${data.provider === 'geoapify' ? 'Geoapify' : 'OSM'} encontrados. Revisa duplicados antes de guardar.` : 'No encontramos negocios cercanos en ese radio.' })
     } catch (err) {
       setMessage({ type: 'error', text: err.message })
     } finally {
@@ -355,7 +360,7 @@ export default function LocalMapAdmin() {
     }
   }
 
-  function selectCandidate(candidate, preferredSector = '') {
+  function selectCandidate(candidate, preferredSector = '', verified = false) {
     const sectorName = preferredSector || candidate.sector || storeForm.sector
     setStoreForm(prev => ({
       ...prev,
@@ -365,7 +370,7 @@ export default function LocalMapAdmin() {
       address: candidate.address || prev.address,
       latitude: String(candidate.lat || ''),
       longitude: String(candidate.lng || ''),
-      is_verified: false,
+      is_verified: verified,
       location_source: candidate.source || 'osm',
     }))
     setMessage({ type: 'ok', text: 'Candidato cargado en el formulario. Revisa datos y guarda.' })
@@ -373,15 +378,36 @@ export default function LocalMapAdmin() {
   }
 
   async function insertStore(payload) {
-    let result = await supabase.from('stores').insert(payload).select('id').single()
-    if (result.error && payload.source && isOptionalSourceError(result.error)) {
-      const { source, ...fallbackPayload } = payload
-      result = await supabase.from('stores').insert(fallbackPayload).select('id').single()
+    let nextPayload = { ...payload }
+    let result = null
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      result = await supabase.from('stores').insert(nextPayload).select('id').single()
+      if (!result.error) return result
+
+      const message = result.error.message || ''
+      if (nextPayload.source && isOptionalSourceError(result.error)) {
+        const { source, ...fallbackPayload } = nextPayload
+        nextPayload = fallbackPayload
+        continue
+      }
+      if (nextPayload.store_type && /store_type/i.test(message) && /(column|schema cache|could not find)/i.test(message)) {
+        const { store_type, ...fallbackPayload } = nextPayload
+        nextPayload = fallbackPayload
+        continue
+      }
+      if (nextPayload.location_source && /location_source/i.test(message) && /(column|schema cache|could not find)/i.test(message)) {
+        const { location_source, ...fallbackPayload } = nextPayload
+        nextPayload = fallbackPayload
+        continue
+      }
+      return result
     }
+
     return result
   }
 
-  async function saveCandidate(candidate, preferredSector = '') {
+  async function saveCandidate(candidate, preferredSector = '', verified = false) {
     const duplicate = duplicateForCandidate(candidate, stores)
     if (duplicate) {
       setMessage({ type: 'error', text: `No se guardo: parece duplicado de ${duplicate.name}.` })
@@ -394,13 +420,14 @@ export default function LocalMapAdmin() {
       normalized_name: normalize(candidate.name),
       chain: null,
       type: mapOsmType(candidate.type),
+      store_type: mapOsmType(candidate.type),
       sector: sector?.name || preferredSector || candidate.sector || 'Sin sector',
       sector_id: sector?.id || null,
       address: candidate.address || null,
       ...coordinatePayload(candidate.lat, candidate.lng),
-      source: 'osm',
-      location_source: 'osm',
-      is_verified: false,
+      source: candidate.source || 'geoapify',
+      location_source: candidate.source || 'geoapify',
+      is_verified: verified,
       is_active: true,
       updated_at: new Date().toISOString(),
     }
@@ -469,12 +496,13 @@ export default function LocalMapAdmin() {
       normalized_name: normalize(storeForm.name),
       chain: storeForm.chain.trim() || null,
       type: storeForm.type || 'otro',
+      ...(!editingStoreId ? { store_type: storeForm.type || 'otro' } : {}),
       sector: sector?.name || storeForm.sector || 'Sin sector',
       sector_id: sector?.id || null,
       address: storeForm.address.trim() || null,
       ...coords,
       location_source: storeForm.location_source || 'admin',
-      ...(!editingStoreId && String(storeForm.location_source || '').includes('osm') ? { source: 'osm' } : {}),
+      ...(!editingStoreId && ['geoapify', 'osm'].includes(String(storeForm.location_source || '')) ? { source: storeForm.location_source } : {}),
       is_verified: Boolean(storeForm.is_verified),
       is_active: true,
       updated_at: new Date().toISOString(),
@@ -568,7 +596,7 @@ export default function LocalMapAdmin() {
       <section className="rounded-[2rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 p-5 text-white shadow-xl">
         <p className="text-xs font-bold uppercase tracking-[0.25em] text-blue-100">PriceNow Local Intelligence</p>
         <h1 className="mt-2 text-2xl font-black">Negocios y sectores</h1>
-        <p className="mt-2 text-sm text-blue-50">Busca negocios reales en OpenStreetMap, revisa duplicados y guarda solo coordenadas confiables.</p>
+        <p className="mt-2 text-sm text-blue-50">Busca negocios reales con Geoapify y OSM, revisa duplicados y guarda solo coordenadas confiables.</p>
       </section>
 
       {message && <div className={`rounded-2xl border p-3 text-sm font-semibold ${message.type === 'error' ? 'border-red-100 bg-red-50 text-red-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>{message.text}</div>}
@@ -596,7 +624,7 @@ export default function LocalMapAdmin() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="font-black text-slate-900">Buscar negocios cercanos automaticamente</h2>
-              <FieldHint>Usa tu ubicacion actual y trae candidatos reales desde OpenStreetMap/Overpass.</FieldHint>
+              <FieldHint>Usa tu ubicacion actual y trae candidatos reales desde Geoapify. Si no hay resultados, PriceNow usa OSM como respaldo.</FieldHint>
             </div>
             <StatusPill tone="blue">{nearbyCandidates.length}</StatusPill>
           </div>
@@ -610,8 +638,12 @@ export default function LocalMapAdmin() {
             <select value={nearbyForm.type} onChange={e => setNearbyForm({ ...nearbyForm, type: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
               {SEARCH_TYPES.map(type => <option key={type} value={type}>{type === 'all' ? 'Todos los tipos' : type}</option>)}
             </select>
-            <button disabled={nearbyLoading || !position} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{nearbyLoading ? 'Buscando...' : 'Buscar negocios en mapa'}</button>
+            <button disabled={nearbyLoading || !position} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{nearbyLoading ? 'Buscando...' : 'Buscar negocios'}</button>
           </div>
+          <label className="mt-3 flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3 text-sm font-bold text-slate-700">
+            Guardar candidatos como verificados
+            <input type="checkbox" checked={externalVerified} onChange={e => setExternalVerified(e.target.checked)} />
+          </label>
           {position && <p className="mt-2 text-xs text-slate-500">Ubicacion lista: {Number(position.lat).toFixed(5)}, {Number(position.lng).toFixed(5)}</p>}
         </form>
         {nearbyCandidates.length > 0 && (
@@ -622,8 +654,8 @@ export default function LocalMapAdmin() {
                 candidate={candidate}
                 duplicate={duplicateForCandidate(candidate, stores)}
                 saving={saving}
-                onSelect={selectCandidate}
-                onSave={saveCandidate}
+                onSelect={item => selectCandidate(item, '', externalVerified)}
+                onSave={item => saveCandidate(item, '', externalVerified)}
               />
             ))}
           </div>
@@ -635,7 +667,7 @@ export default function LocalMapAdmin() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="font-black text-slate-900">Buscar negocio real</h2>
-              <FieldHint>Busca por nombre, comuna o direccion. Los resultados vienen de OSM y se revisan antes de guardar.</FieldHint>
+            <FieldHint>Busca por nombre, comuna o direccion. Los resultados se revisan antes de guardar.</FieldHint>
             </div>
             <StatusPill tone="blue">{searchResults.length}</StatusPill>
           </div>
@@ -657,8 +689,8 @@ export default function LocalMapAdmin() {
                 candidate={candidate}
                 duplicate={duplicateForCandidate(candidate, stores)}
                 saving={saving}
-                onSelect={selectCandidate}
-                onSave={saveCandidate}
+                onSelect={item => selectCandidate(item, '', externalVerified)}
+                onSave={item => saveCandidate(item, '', externalVerified)}
               />
             ))}
           </div>
@@ -669,7 +701,7 @@ export default function LocalMapAdmin() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-black text-slate-900">{editingStoreId ? 'Editar negocio' : 'Agregar negocio'}</h2>
-            <FieldHint>Usa primero la busqueda OSM cuando sea posible. Las coordenadas quedan en opciones avanzadas.</FieldHint>
+            <FieldHint>Usa primero la busqueda automatica cuando sea posible. Las coordenadas quedan en opciones avanzadas.</FieldHint>
           </div>
           {editingStoreId && <button type="button" onClick={cancelStoreEdit} className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">Cancelar</button>}
         </div>
@@ -743,8 +775,8 @@ export default function LocalMapAdmin() {
                 candidate={candidate}
                 duplicate={duplicateForCandidate(candidate, stores)}
                 saving={saving}
-                onSelect={item => selectCandidate(item, importForm.sector)}
-                onSave={item => saveCandidate(item, importForm.sector)}
+                onSelect={item => selectCandidate(item, importForm.sector, externalVerified)}
+                onSave={item => saveCandidate(item, importForm.sector, externalVerified)}
               />
             ))}
           </div>

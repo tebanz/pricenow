@@ -2,95 +2,22 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
+import { dedupePlaces, isDuplicatePlace, placeToStore } from '../utils/geoPlaces'
+import { formatDistance, getDistanceMeters, isValidCoordinate } from '../utils/location'
+import { normalizeName } from '../utils/normalize'
 
 const NEARBY_RADIUS_M = 8000
 const MAX_SECTOR_DETECTION_M = 50000
-const OSM_RADII_M = [1500, 3000, 5000]
-const OSM_LIMIT = 12
-
-function normalize(text = '') {
-  return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-}
-
-function isValidCoordinate(lat, lng) {
-  if (lat === null || lat === undefined || lng === null || lng === undefined) return false
-  if (String(lat).trim() === '' || String(lng).trim() === '') return false
-  const latitude = Number(lat)
-  const longitude = Number(lng)
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false
-  if (latitude === 0 && longitude === 0) return false
-  return Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
-}
-
-function distanceMeters(a, b) {
-  if (!isValidCoordinate(a?.lat, a?.lng) || !isValidCoordinate(b?.lat, b?.lng)) return null
-  const R = 6371000
-  const toRad = value => Number(value) * Math.PI / 180
-  const dLat = toRad(Number(b.lat) - Number(a.lat))
-  const dLng = toRad(Number(b.lng) - Number(a.lng))
-  const lat1 = toRad(a.lat)
-  const lat2 = toRad(b.lat)
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
-  return Math.round(2 * R * Math.asin(Math.sqrt(h)))
-}
-
-function formatDistance(meters) {
-  if (meters == null) return 'Sin distancia'
-  if (meters < 1000) return `${meters} m`
-  return `${(meters / 1000).toFixed(1).replace('.0', '')} km`
-}
+const SEARCH_RADII_M = [1500, 3000, 5000]
+const PROVIDER_LIMIT = 12
 
 function hasCoords(row) {
   return isValidCoordinate(row?.latitude, row?.longitude)
 }
 
-function mapOsmType(type = '') {
-  const key = normalize(type)
-  if (key.includes('supermarket')) return 'supermercado'
-  if (key.includes('wholesale')) return 'mayorista'
-  if (key.includes('convenience')) return 'minimarket'
-  if (key.includes('bakery')) return 'panaderia'
-  if (key.includes('butcher')) return 'carniceria'
-  if (key.includes('greengrocer')) return 'verduleria'
-  if (key.includes('marketplace')) return 'feria'
-  if (key.includes('pharmacy') || key.includes('chemist')) return 'farmacia'
-  return 'negocio'
-}
-
 function isOptionalSourceError(error) {
   const message = error?.message || ''
   return /source/i.test(message) && /(column|schema cache|could not find)/i.test(message)
-}
-
-function duplicateByNameAndDistance(candidate, list) {
-  const candidateName = normalize(candidate?.name)
-  if (!candidateName) return false
-  const candidatePoint = { lat: candidate.latitude ?? candidate.lat, lng: candidate.longitude ?? candidate.lng }
-  return list.some(store => {
-    const storeName = normalize(store.name)
-    if (!storeName) return false
-    const sameName = candidateName === storeName
-    const similarName = sameName || (candidateName.length > 5 && storeName.length > 5 && (candidateName.includes(storeName) || storeName.includes(candidateName)))
-    if (!similarName) return false
-    const distance = distanceMeters(candidatePoint, { lat: store.latitude ?? store.lat, lng: store.longitude ?? store.lng })
-    return distance != null && distance < 300
-  })
-}
-
-function osmPlaceToStore(place) {
-  return {
-    id: `osm-${place.id}`,
-    osm_id: place.id,
-    name: place.name,
-    type: mapOsmType(place.type),
-    address: place.address || '',
-    sector: place.sector || place.commune || '',
-    latitude: Number(place.lat),
-    longitude: Number(place.lng),
-    source: 'osm',
-    is_osm: true,
-    is_verified: false,
-  }
 }
 
 function readFlexiblePoints(row) {
@@ -166,49 +93,51 @@ export default function Home() {
 
   useEffect(() => { load() }, [user?.id])
 
-  async function fetchOsmNearby(origin) {
+  async function fetchProviderNearby(origin, provider, radius) {
+    const params = new URLSearchParams({
+      mode: 'nearby',
+      lat: String(origin.lat),
+      lng: String(origin.lng),
+      radius: String(radius),
+      radius_m: String(radius),
+      type: 'all',
+      limit: String(PROVIDER_LIMIT),
+    })
+    const endpoint = provider === 'geoapify' ? '/api/nearby-geoapify' : '/api/nearby-osm'
+    const response = await fetch(`${endpoint}?${params.toString()}`)
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || `No se pudo consultar ${provider}.`)
+
+    return (data.places || [])
+      .filter(place => isValidCoordinate(place.lat, place.lng))
+      .filter(place => place.distance_m == null || Number(place.distance_m) <= radius + 50)
+      .filter(place => place.distance_km == null || Number(place.distance_km) * 1000 <= radius + 50)
+      .map(place => placeToStore(place, provider))
+  }
+
+  async function fetchMapNearby(origin) {
     setOsmStatus({ state: 'loading', radius: null })
     setOsmStores([])
 
     let lastError = null
-    for (const radius of OSM_RADII_M) {
-      try {
-        const params = new URLSearchParams({
-          mode: 'nearby',
-          lat: String(origin.lat),
-          lng: String(origin.lng),
-          radius_m: String(radius),
-          type: 'all',
-          limit: String(OSM_LIMIT),
-        })
-        const response = await fetch(`/api/nearby-osm?${params.toString()}`)
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) throw new Error(data.error || 'No se pudo consultar OpenStreetMap.')
-
-        const places = (data.places || [])
-          .filter(place => isValidCoordinate(place.lat, place.lng))
-          .filter(place => place.distance_km == null || Number(place.distance_km) * 1000 <= radius + 50)
-          .map(osmPlaceToStore)
-
-        if (places.length > 0) {
-          setOsmStores(places)
-          setOsmStatus({ state: 'ok', radius })
-          return
+    for (const provider of ['geoapify', 'osm']) {
+      for (const radius of SEARCH_RADII_M) {
+        try {
+          const places = await fetchProviderNearby(origin, provider, radius)
+          if (places.length > 0) {
+            setOsmStores(places)
+            setOsmStatus({ state: 'ok', radius, provider })
+            return
+          }
+        } catch (err) {
+          lastError = err
+          console.error(`PriceNow ${provider} nearby search failed:`, err)
         }
-      } catch (err) {
-        lastError = err
       }
     }
 
-    setOsmStatus({ state: lastError ? 'error' : 'empty', radius: OSM_RADII_M[OSM_RADII_M.length - 1] })
+    setOsmStatus({ state: lastError ? 'error' : 'empty', radius: SEARCH_RADII_M[SEARCH_RADII_M.length - 1], provider: null })
   }
-
-  useEffect(() => {
-    if (!navigator.permissions || !navigator.geolocation) return
-    navigator.permissions.query({ name: 'geolocation' }).then(permission => {
-      if (permission.state === 'granted' && locationStatus === 'idle') askLocation()
-    }).catch(() => {})
-  }, [locationStatus])
 
   function askLocation() {
     if (!navigator.geolocation) {
@@ -225,7 +154,7 @@ export default function Home() {
         }
         setPosition(nextPosition)
         setLocationStatus('ok')
-        fetchOsmNearby(nextPosition)
+        fetchMapNearby(nextPosition)
       },
       () => setLocationStatus('error'),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
@@ -233,16 +162,32 @@ export default function Home() {
   }
 
   async function insertStore(payload) {
-    let result = await supabase.from('stores').insert(payload).select('id').single()
-    if (result.error && payload.source && isOptionalSourceError(result.error)) {
-      const { source, ...fallbackPayload } = payload
-      result = await supabase.from('stores').insert(fallbackPayload).select('id').single()
+    let nextPayload = { ...payload }
+    let result = null
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      result = await supabase.from('stores').insert(nextPayload).select('id').single()
+      if (!result.error) return result
+
+      const message = result.error.message || ''
+      if (nextPayload.source && isOptionalSourceError(result.error)) {
+        const { source, ...fallbackPayload } = nextPayload
+        nextPayload = fallbackPayload
+        continue
+      }
+      if (nextPayload.location_source && /location_source/i.test(message) && /(column|schema cache|could not find)/i.test(message)) {
+        const { location_source, ...fallbackPayload } = nextPayload
+        nextPayload = fallbackPayload
+        continue
+      }
+      return result
     }
+
     return result
   }
 
   async function saveOsmStore(store) {
-    if (duplicateByNameAndDistance(store, stores)) {
+    if (isDuplicatePlace(store, stores)) {
       setLocalMessage({ type: 'error', text: 'Ese negocio parece estar duplicado en PriceNow.' })
       return
     }
@@ -251,7 +196,7 @@ export default function Home() {
     setLocalMessage(null)
     const payload = {
       name: store.name.trim(),
-      normalized_name: normalize(store.name),
+      normalized_name: normalizeName(store.name),
       chain: null,
       type: store.type || 'negocio',
       sector: store.sector || 'Sin sector',
@@ -259,8 +204,8 @@ export default function Home() {
       address: store.address || null,
       latitude: Number(store.latitude),
       longitude: Number(store.longitude),
-      source: 'osm',
-      location_source: 'osm',
+      source: store.provider || store.source || 'geoapify',
+      location_source: store.provider || store.source || 'geoapify',
       is_verified: false,
       is_active: true,
       updated_at: new Date().toISOString(),
@@ -270,7 +215,7 @@ export default function Home() {
     if (!result.error && result.data?.id) {
       await supabase
         .from('store_aliases')
-        .insert({ store_id: result.data.id, alias: payload.name, alias_key: normalize(payload.name), created_by: user?.id || null })
+        .insert({ store_id: result.data.id, alias: payload.name, alias_key: normalizeName(payload.name), created_by: user?.id || null })
         .then(() => {})
     }
 
@@ -292,10 +237,10 @@ export default function Home() {
         ...store,
         source_label: 'Verificado PriceNow',
         source_kind: 'pricenow',
-        distance_m: distanceMeters(position, { lat: store.latitude, lng: store.longitude }),
+        distance_m: getDistanceMeters(position.lat, position.lng, store.latitude, store.longitude),
       }))
       .filter(store => store.distance_m != null && store.distance_m <= NEARBY_RADIUS_M)
-      .sort((a, b) => a.distance_m - b.distance_m)
+      .sort((a, b) => Number(Boolean(b.is_verified)) - Number(Boolean(a.is_verified)) || a.distance_m - b.distance_m)
   }, [stores, position])
 
   const osmNearbyStores = useMemo(() => {
@@ -304,25 +249,28 @@ export default function Home() {
       .map(store => ({
         ...store,
         source_label: 'Detectado por mapa',
-        source_kind: 'osm',
-        distance_m: distanceMeters(position, { lat: store.latitude, lng: store.longitude }),
+        source_kind: store.provider || 'map',
+        distance_m: getDistanceMeters(position.lat, position.lng, store.latitude, store.longitude),
       }))
-      .filter(store => store.distance_m != null && store.distance_m <= OSM_RADII_M[OSM_RADII_M.length - 1])
+      .filter(store => store.distance_m != null && store.distance_m <= SEARCH_RADII_M[SEARCH_RADII_M.length - 1])
       .sort((a, b) => a.distance_m - b.distance_m)
   }, [osmStores, position])
 
   const nearbyStores = useMemo(() => {
-    const combined = []
-    ;[...supabaseNearbyStores, ...osmNearbyStores].forEach(store => {
-      if (!duplicateByNameAndDistance(store, combined)) combined.push(store)
-    })
-    return combined.sort((a, b) => a.distance_m - b.distance_m).slice(0, 3)
+    const combined = dedupePlaces(supabaseNearbyStores, osmNearbyStores)
+    return combined
+      .sort((a, b) => {
+        const priorityA = a.source_kind === 'pricenow' ? (a.is_verified ? 0 : 1) : 2
+        const priorityB = b.source_kind === 'pricenow' ? (b.is_verified ? 0 : 1) : 2
+        return priorityA - priorityB || a.distance_m - b.distance_m
+      })
+      .slice(0, 3)
   }, [supabaseNearbyStores, osmNearbyStores])
 
   const nearestSector = useMemo(() => {
     if (!position) return null
     return sectors
-      .map(sector => ({ ...sector, distance_m: distanceMeters(position, { lat: sector.latitude, lng: sector.longitude }) }))
+      .map(sector => ({ ...sector, distance_m: getDistanceMeters(position.lat, position.lng, sector.latitude, sector.longitude) }))
       .filter(sector => sector.distance_m != null)
       .sort((a, b) => a.distance_m - b.distance_m)[0] || null
   }, [sectors, position])
@@ -391,7 +339,7 @@ export default function Home() {
 
         {position && osmStatus.state !== 'loading' && nearbyStores.length === 0 && (
           <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-            Aun no encontramos negocios cercanos con coordenadas reales en PriceNow ni en el mapa.
+            No encontramos negocios cercanos todavía. Intenta ampliar el radio o vuelve más tarde.
             {isValidator && <Link to="/local-map" className="mt-2 block font-black text-blue-600">Agregar negocios desde el mapa local</Link>}
           </div>
         )}
@@ -406,7 +354,7 @@ export default function Home() {
                     <p className="truncate text-xs text-slate-500">{store.type || store.chain || 'negocio'} - {store.source_label}</p>
                     <p className="mt-1 text-xs font-black text-blue-600">{formatDistance(store.distance_m)}</p>
                   </div>
-                  {isValidator && store.source_kind === 'osm' && (
+                  {isValidator && store.source_kind !== 'pricenow' && (
                     <button
                       type="button"
                       onClick={() => saveOsmStore(store)}
