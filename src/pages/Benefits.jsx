@@ -37,13 +37,6 @@ export default function Benefits() {
           ))}
         </div>
       </section>
-
-      <section className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
-        <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">KairosNow</p>
-        <p className="mt-2 text-sm leading-relaxed text-slate-600">
-          PriceNow forma parte de KairosNow, un ecosistema de herramientas para precios, negocios, finanzas y comunidad local.
-        </p>
-      </section>
     </div>
   )
 }

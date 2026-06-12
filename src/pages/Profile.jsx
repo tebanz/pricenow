@@ -201,7 +201,6 @@ export default function Profile() {
   const [entries, setEntries] = useState([])
   const [wallet, setWallet] = useState(null)
   const [transactions, setTransactions] = useState([])
-  const [redemptions, setRedemptions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [profileForm, setProfileForm] = useState({ username: '', full_name: '' })
@@ -234,7 +233,7 @@ export default function Profile() {
       setLoading(true)
       setError(null)
 
-      const [entriesResult, walletResult, transactionsResult, redemptionsResult] = await Promise.all([
+      const [entriesResult, walletResult, transactionsResult] = await Promise.all([
         supabase
           .from('price_entries')
           .select(`
@@ -265,12 +264,6 @@ export default function Profile() {
           .eq('user_id', user.id)
           .order('created_at', { ascending: false })
           .limit(20),
-        supabase
-          .from('coupon_redemptions')
-          .select('*, coupons(title, discount_label, business_partners(name))')
-          .eq('user_id', user.id)
-          .order('redeemed_at', { ascending: false })
-          .limit(6),
       ])
 
       if (entriesResult.error) {
@@ -282,7 +275,6 @@ export default function Profile() {
 
       setWallet(walletResult.data || { current_points: 0, lifetime_points: 0 })
       setTransactions(transactionsResult.data || [])
-      setRedemptions(redemptionsResult.data || [])
       setLoading(false)
     }
 
@@ -570,18 +562,6 @@ export default function Profile() {
         </div>
       </section>
 
-      <section className="card border-blue-100">
-        <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">KairosNow</p>
-        <p className="mt-2 text-sm leading-relaxed text-slate-600">
-          PriceNow forma parte de KairosNow, un ecosistema de herramientas para precios, negocios, finanzas y comunidad local.
-        </p>
-        <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black">
-          <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">PriceNow<br /><span className="font-semibold">Activo</span></div>
-          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">LedgerNow<br /><span className="font-semibold">Proximamente</span></div>
-          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">WalleNow<br /><span className="font-semibold">Proximamente</span></div>
-        </div>
-      </section>
-
       <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
         {tabs.map(([id, label]) => (
           <TabButton key={id} id={id} active={activeTab === id} onClick={changeTab}>{label}</TabButton>
@@ -648,29 +628,12 @@ export default function Profile() {
               <h3 className="font-bold text-slate-900">Beneficios y cupones</h3>
               <button type="button" onClick={() => changeTab('beneficios')} className="text-xs font-semibold text-brand-500">Ver modulo futuro</button>
             </div>
-            {true ? (
-              <div className="rounded-2xl bg-brand-50 border border-brand-100 p-4">
-                <p className="font-bold text-brand-700 text-sm">Proximamente</p>
-                <p className="text-xs text-brand-700/70 mt-1">
-                  Muy pronto podras canjear puntos por descuentos, cupones y beneficios en negocios asociados.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {redemptions.map(redemption => (
-                  <div key={redemption.id} className="rounded-2xl bg-slate-50 border border-slate-100 p-3 flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="font-bold text-slate-800 text-sm truncate">{redemption.coupons?.title || 'Beneficio'}</p>
-                      <p className="text-xs text-slate-400 truncate">{redemption.coupons?.business_partners?.name || 'PriceNow'}</p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="font-black text-brand-600">{redemption.code}</p>
-                      <p className="text-[11px] text-slate-400">-{redemption.points_spent} pts</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <div className="rounded-2xl bg-brand-50 border border-brand-100 p-4">
+              <p className="font-bold text-brand-700 text-sm">Proximamente</p>
+              <p className="text-xs text-brand-700/70 mt-1">
+                Muy pronto podras canjear puntos por descuentos, cupones y beneficios en negocios asociados.
+              </p>
+            </div>
           </section>
 
           <section className="grid grid-cols-2 gap-3">
@@ -934,9 +897,9 @@ export default function Profile() {
           </section>
 
           <section className="card bg-slate-900 text-white border-slate-900">
-            <h3 className="font-bold">Diseño simplificado</h3>
+            <h3 className="font-bold">Beneficios en preparacion</h3>
             <p className="text-sm text-white/70 mt-1">
-              Beneficios vive dentro de Perfil y Reportes vive dentro de Precios. Así la navegación principal queda más limpia.
+              Beneficios y cupones quedan como modulo futuro mientras PriceNow mantiene la navegacion principal enfocada en precios.
             </p>
           </section>
         </div>

@@ -6,11 +6,6 @@ import { useAuth } from '../context/AuthContext'
 const NEARBY_RADIUS_M = 8000
 const MAX_SECTOR_DETECTION_M = 50000
 
-function money(value) {
-  const number = Number(value || 0)
-  return number.toLocaleString('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 })
-}
-
 function isValidCoordinate(lat, lng) {
   if (lat === null || lat === undefined || lng === null || lng === undefined) return false
   if (String(lat).trim() === '' || String(lng).trim() === '') return false
@@ -71,16 +66,13 @@ export default function Home() {
   const [locationStatus, setLocationStatus] = useState('idle')
   const [stores, setStores] = useState([])
   const [sectors, setSectors] = useState([])
-  const [prices, setPrices] = useState([])
   const [stats, setStats] = useState({ today: 0, points: 0 })
-  const [loadError, setLoadError] = useState(null)
 
   async function load() {
-    setLoadError(null)
     const start = new Date()
     start.setHours(0, 0, 0, 0)
 
-    const [storesRes, sectorsRes, pricesRes, todayRes, points] = await Promise.all([
+    const [storesRes, sectorsRes, todayRes, points] = await Promise.all([
       supabase
         .from('stores')
         .select('id, name, chain, type, sector, address, latitude, longitude, is_verified')
@@ -95,25 +87,18 @@ export default function Home() {
         .limit(300),
       supabase
         .from('price_entries')
-        .select('id, product_name, store_name, sector, unit_price, unit, purchase_date')
-        .eq('validation_status', 'approved')
-        .order('created_at', { ascending: false })
-        .limit(20),
-      supabase
-        .from('price_entries')
         .select('id', { count: 'exact', head: true })
         .eq('validation_status', 'approved')
         .gte('created_at', start.toISOString()),
       loadUserPoints(user?.id),
     ])
 
-    const error = storesRes.error || pricesRes.error || todayRes.error
-    if (error) setLoadError(error.message)
+    if (storesRes.error) console.warn('PriceNow stores unavailable:', storesRes.error.message)
     if (sectorsRes.error) console.warn('PriceNow sectors unavailable:', sectorsRes.error.message)
+    if (todayRes.error) console.warn('PriceNow daily stats unavailable:', todayRes.error.message)
 
     setStores((storesRes.data || []).filter(hasCoords))
     setSectors((sectorsRes.data || []).filter(hasCoords))
-    setPrices(pricesRes.data || [])
     setStats({
       today: todayRes.count || 0,
       points,
@@ -183,132 +168,101 @@ export default function Home() {
 
   return (
     <div className="space-y-5 pb-32">
-      <section className="relative overflow-hidden rounded-b-[2.5rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 px-5 pb-8 pt-8 text-white shadow-xl">
-        <div className="absolute -right-12 -top-12 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
-        <div className="relative flex items-start justify-between gap-4">
-          <div>
-            <p className="text-lg text-white/80">Hola, {profile?.username || 'usuario'}</p>
-            <h1 className="mt-2 max-w-[270px] text-4xl font-black leading-tight">Precios reales cerca de ti</h1>
-            <p className="mt-4 max-w-sm text-base text-white/80">Compara, reporta y ayuda a construir el mapa local de precios de tu zona.</p>
+      <section className="relative overflow-hidden rounded-b-[2rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 px-5 pb-7 pt-7 text-white shadow-xl">
+        <div className="relative">
+          <p className="text-sm font-semibold text-white/75">Hola, {profile?.username || 'usuario'}</p>
+          <h1 className="mt-2 max-w-sm text-3xl font-black leading-tight">Precios reales cerca de ti</h1>
+          <p className="mt-3 max-w-md text-sm leading-relaxed text-white/75">Reporta un precio o revisa lo que la comunidad ya valido en tu zona.</p>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <Link to="/add" className="rounded-2xl bg-white px-4 py-3 text-center text-sm font-black text-blue-700 shadow-sm">Reportar precio</Link>
+            <Link to="/ranking" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Ver precios</Link>
           </div>
-          <div className="rounded-[1.5rem] bg-white/10 px-5 py-4 text-center backdrop-blur">
-            <p className="text-3xl font-black">{stats.points || 0}</p>
-            <p className="text-sm text-white/80">puntos</p>
-          </div>
-        </div>
-        <div className="relative mt-6 grid grid-cols-3 gap-2">
-          <Link to="/add" className="rounded-2xl bg-white px-4 py-3 text-center text-sm font-black text-blue-700 shadow-sm">Reportar</Link>
-          <Link to="/ranking" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Precios</Link>
-          <Link to="/benefits" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Beneficios<br /><span className="text-[10px] font-bold text-white/70">Proximamente</span></Link>
         </div>
       </section>
 
-      {loadError && (
-        <div className="mx-4 rounded-2xl border border-amber-100 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
-          No se pudo cargar toda la inteligencia local: {loadError}
-        </div>
-      )}
-
-      <section className="mx-4 rounded-[2rem] border border-slate-100 bg-white p-5 shadow-sm">
-        <div className="flex items-start justify-between gap-4">
+      <section className="mx-4 rounded-[1.75rem] border border-slate-100 bg-white p-4 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-xl font-black text-slate-900">Tu zona</h2>
-            <p className="mt-1 text-sm text-slate-500">Activa ubicación para detectar latitud y longitud, ordenar negocios reales cercanos y calcular distancia exacta.</p>
+            <h2 className="font-black text-slate-900">Ubicacion</h2>
+            <p className="mt-1 text-sm text-slate-500">Usamos tu posicion solo para ordenar negocios con coordenadas reales.</p>
           </div>
           <button onClick={askLocation} disabled={locationStatus === 'loading'} className="shrink-0 rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white active:scale-95 disabled:opacity-50">
-            {locationStatus === 'loading' ? 'Buscando...' : 'Usar ubicación'}
+            {locationStatus === 'loading' ? 'Buscando...' : 'Usar ubicacion'}
           </button>
         </div>
 
         {locationStatus === 'ok' && (
           <p className="mt-3 text-sm font-bold text-blue-600">
-            Ubicación activada{position?.accuracy ? `, precisión aprox. ${position.accuracy} m` : ''}.
+            Ubicacion activada{position?.accuracy ? `, precision aprox. ${position.accuracy} m` : ''}.
           </p>
         )}
-        {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicación. Puedes seguir usando PriceNow y elegir sector desde Perfil.</p>}
-        {sectorDetection?.type === 'ok' && <div className="mt-3 rounded-2xl bg-blue-50 p-3 text-sm text-blue-700">Parece que estas cerca de <b>{sectorDetection.name}</b> ({sectorDetection.distance} del centro configurado).</div>}
-        {sectorDetection?.type === 'warning' && <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-sm font-semibold text-amber-800">{sectorDetection.text}</div>}
+        {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicacion. Puedes seguir usando PriceNow sin compartirla.</p>}
+        {sectorDetection?.type === 'ok' && <p className="mt-3 rounded-2xl bg-blue-50 px-3 py-2 text-sm text-blue-700">Sector probable: <b>{sectorDetection.name}</b>.</p>}
+        {sectorDetection?.type === 'warning' && <p className="mt-3 rounded-2xl bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">{sectorDetection.text}</p>}
 
-        {!position ? (
-          <div className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">
-            PriceNow solo mostrará negocios cercanos después de activar tu ubicación. Los negocios sin coordenadas reales quedan fuera de esta lista para evitar distancias inventadas.
+        {!position && (
+          <p className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
+            Activa ubicacion para ver negocios cercanos. Los negocios sin coordenadas validas no aparecen como cercanos.
+          </p>
+        )}
+
+        {position && nearbyStores.length === 0 && (
+          <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
+            Aun no hay negocios con coordenadas reales cerca de esta ubicacion.
+            {isValidator && <Link to="/local-map" className="mt-2 block font-black text-blue-600">Agregar negocios desde el mapa local</Link>}
           </div>
-        ) : nearbyStores.length === 0 ? (
-          <div className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">
-            Aún no hay negocios con coordenadas reales cerca de esta ubicación. Un admin puede agregar negocios, completar latitud/longitud o verificar coordenadas desde el mapa local.
-            {isValidator && <Link to="/local-map" className="mt-3 block font-black text-blue-600">Agregar negocios con coordenadas</Link>}
-          </div>
-        ) : (
-          <div className="mt-4 space-y-2">
-            {nearbyStores.map(store => (
-              <div key={store.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3">
-                <div className="min-w-0">
-                  <p className="truncate font-bold text-slate-900">{store.name}</p>
-                  <p className="truncate text-xs text-slate-500">{store.sector || 'Sin sector'} · {store.type || store.chain || 'negocio'}{store.is_verified ? ' · verificado' : ''}</p>
+        )}
+
+        {nearbyStores.length > 0 && (
+          <details className="mt-3 rounded-2xl bg-slate-50 p-3">
+            <summary className="cursor-pointer text-sm font-black text-slate-800">
+              {nearbyStores.length} negocios cercanos con coordenadas
+            </summary>
+            <div className="mt-3 space-y-2">
+              {nearbyStores.slice(0, 4).map(store => (
+                <div key={store.id} className="flex items-center justify-between gap-3 rounded-2xl bg-white p-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-bold text-slate-900">{store.name}</p>
+                    <p className="truncate text-xs text-slate-500">{store.sector || 'Sin sector'} · {store.type || store.chain || 'negocio'}</p>
+                  </div>
+                  <span className="shrink-0 text-sm font-black text-blue-600">{formatDistance(store.distance_m)}</span>
                 </div>
-                <span className="shrink-0 text-sm font-black text-blue-600">{formatDistance(store.distance_m)}</span>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          </details>
         )}
       </section>
 
-      <div className="mx-4 grid grid-cols-2 gap-3">
-        <div className="rounded-[2rem] border border-slate-100 bg-white p-5 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Hoy</p>
-          <p className="mt-2 text-3xl font-black text-slate-900">{stats.today}</p>
-          <p className="text-sm text-slate-500">precios aprobados</p>
-        </div>
-        <div className="rounded-[2rem] border border-slate-100 bg-white p-5 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Meta sugerida</p>
-          <p className="mt-2 text-3xl font-black text-slate-900">+15</p>
-          <p className="text-sm text-slate-500">puntos por reportar hoy</p>
-        </div>
-      </div>
-
-      <section className="mx-4 rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
-        <div className="flex items-center justify-between">
-          <h2 className="font-black text-slate-900">Mejores precios recientes</h2>
-          <Link to="/ranking" className="text-xs font-black text-blue-600">Ver todo</Link>
-        </div>
-        <div className="mt-3 space-y-2">
-          {prices.slice(0, 6).map(price => (
-            <div key={price.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3">
-              <div className="min-w-0">
-                <p className="truncate font-bold text-slate-900">{price.product_name}</p>
-                <p className="truncate text-xs text-slate-500">{price.store_name} · {price.sector}</p>
-              </div>
-              <div className="shrink-0 text-right">
-                <p className="font-black text-emerald-600">{money(price.unit_price)}</p>
-                <p className="text-xs text-slate-400">por {price.unit}</p>
-              </div>
-            </div>
-          ))}
-          {prices.length === 0 && <p className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">Aún no hay precios aprobados.</p>}
-        </div>
+      <section className="mx-4 rounded-[1.75rem] border border-slate-100 bg-white p-4 shadow-sm">
+        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Resumen</p>
+        <p className="mt-2 text-sm leading-relaxed text-slate-600">
+          Hoy hay <b className="text-slate-900">{stats.today}</b> precios aprobados. Tienes <b className="text-slate-900">{stats.points || 0}</b> puntos disponibles.
+        </p>
+        <details className="mt-3">
+          <summary className="cursor-pointer text-sm font-black text-blue-600">Ver mas herramientas</summary>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <Link to="/benefits" className="rounded-2xl bg-slate-50 px-4 py-3 text-center text-sm font-black text-slate-600">Beneficios<br /><span className="text-[10px] text-slate-400">Proximamente</span></Link>
+            {isValidator && <Link to="/quality" className="rounded-2xl bg-slate-950 px-4 py-3 text-center text-sm font-black text-white">Calidad</Link>}
+            {isValidator && <Link to="/local-map" className="rounded-2xl bg-blue-50 px-4 py-3 text-center text-sm font-black text-blue-700">Mapa local</Link>}
+            {isValidator && <Link to="/validate" className="rounded-2xl bg-amber-50 px-4 py-3 text-center text-sm font-black text-amber-700">Validar</Link>}
+          </div>
+        </details>
       </section>
 
-      <section className="mx-4 rounded-[2rem] border border-blue-100 bg-white p-4 shadow-sm">
-        <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">KairosNow</p>
-        <p className="mt-2 text-sm leading-relaxed text-slate-600">PriceNow forma parte de KairosNow, un ecosistema de herramientas para precios, negocios, finanzas y comunidad local.</p>
+      <section className="mx-4 rounded-[1.5rem] border border-blue-100 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">Parte de KairosNow</p>
+            <p className="mt-1 text-sm text-slate-600">Herramientas para precios, negocios, finanzas y comunidad local.</p>
+          </div>
+          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">PriceNow activo</span>
+        </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black">
           <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">PriceNow<br /><span className="font-semibold">Activo</span></div>
           <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">LedgerNow<br /><span className="font-semibold">Proximamente</span></div>
           <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">WalleNow<br /><span className="font-semibold">Proximamente</span></div>
         </div>
       </section>
-
-      {isValidator && (
-        <section className="mx-4 rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
-          <h2 className="font-black text-slate-900">Herramientas admin</h2>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <Link to="/quality" className="rounded-2xl bg-slate-950 px-4 py-3 text-center text-sm font-black text-white">Calidad de datos</Link>
-            <Link to="/local-map" className="rounded-2xl bg-blue-50 px-4 py-3 text-center text-sm font-black text-blue-700">Mapa local</Link>
-            <Link to="/partners" className="rounded-2xl bg-blue-50 px-4 py-3 text-center text-sm font-black text-blue-700">Negocios asociados</Link>
-            <Link to="/validate" className="rounded-2xl bg-amber-50 px-4 py-3 text-center text-sm font-black text-amber-700">Validar</Link>
-          </div>
-        </section>
-      )}
     </div>
   )
 }

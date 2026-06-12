@@ -5,8 +5,10 @@ import { useAuth } from '../context/AuthContext'
 const STORE_TYPES = ['supermercado', 'minimarket', 'almacen', 'panaderia', 'carniceria', 'verduleria', 'feria', 'mayorista', 'farmacia', 'otro']
 const MAX_SECTOR_DETECTION_M = 50000
 
-const EMPTY_STORE = { name: '', chain: '', type: 'supermercado', sector: '', address: '', latitude: '', longitude: '', is_verified: true }
+const EMPTY_STORE = { name: '', chain: '', type: 'supermercado', sector: '', address: '', latitude: '', longitude: '', is_verified: true, location_source: 'admin' }
 const EMPTY_SECTOR = { commune: 'Rancagua', name: '', latitude: '', longitude: '', radius_m: 900, is_active: true }
+const EMPTY_SEARCH = { name: '', commune: 'Rancagua', address: '', type: 'supermercado' }
+const EMPTY_IMPORT = { commune: 'Rancagua', type: 'supermercado', sector: '' }
 
 function normalize(text = '') {
   return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
@@ -54,6 +56,19 @@ function formatDistance(meters) {
   return `${(meters / 1000).toFixed(1).replace('.0', '')} km`
 }
 
+function mapOsmType(type = '') {
+  const key = normalize(type)
+  if (key.includes('supermarket')) return 'supermercado'
+  if (key.includes('wholesale')) return 'mayorista'
+  if (key.includes('convenience')) return 'minimarket'
+  if (key.includes('bakery')) return 'panaderia'
+  if (key.includes('butcher')) return 'carniceria'
+  if (key.includes('greengrocer')) return 'verduleria'
+  if (key.includes('marketplace')) return 'feria'
+  if (key.includes('pharmacy') || key.includes('chemist')) return 'farmacia'
+  return STORE_TYPES.includes(key) ? key : 'otro'
+}
+
 function FieldHint({ children }) {
   return <p className="text-xs leading-relaxed text-slate-500">{children}</p>
 }
@@ -66,7 +81,53 @@ function StatusPill({ children, tone = 'slate' }) {
     amber: 'bg-amber-50 text-amber-700',
     red: 'bg-red-50 text-red-700',
   }
-  return <span className={`rounded-full px-2 py-1 text-[11px] font-bold ${tones[tone]}`}>{children}</span>
+  return <span className={`rounded-full px-2 py-1 text-[11px] font-bold ${tones[tone] || tones.slate}`}>{children}</span>
+}
+
+function duplicateForCandidate(candidate, stores, ignoreId = null) {
+  if (!candidate?.name) return null
+  const candidateName = normalize(candidate.name)
+  if (!candidateName) return null
+  const candidatePoint = { lat: candidate.lat ?? candidate.latitude, lng: candidate.lng ?? candidate.longitude }
+
+  return stores.find(store => {
+    if (store.id === ignoreId || store.is_active === false) return false
+    const storeName = normalize(store.name)
+    if (!storeName) return false
+    const sameName = storeName === candidateName
+    const similarName = sameName || (candidateName.length > 5 && storeName.length > 5 && (candidateName.includes(storeName) || storeName.includes(candidateName)))
+    const distance = distanceMeters(candidatePoint, { lat: store.latitude, lng: store.longitude })
+
+    if (sameName && distance == null && !hasCoords(store)) return true
+    if (sameName && distance != null && distance <= 250) return true
+    if (similarName && distance != null && distance <= 150) return true
+    return false
+  }) || null
+}
+
+function CandidateCard({ candidate, duplicate, onSelect, onSave, saving }) {
+  const url = mapsUrl(candidate.lat, candidate.lng)
+  const closeDistance = candidate.distance_km != null && Number(candidate.distance_km) <= 50
+  return (
+    <div className="rounded-2xl border border-slate-100 bg-white p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="font-bold text-slate-900">{candidate.name}</p>
+            <StatusPill tone={duplicate ? 'amber' : 'green'}>{duplicate ? 'Posible duplicado' : 'Candidato nuevo'}</StatusPill>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">{candidate.address || 'Sin direccion en OSM'} - {mapOsmType(candidate.type)}</p>
+          <p className="mt-1 text-xs text-slate-400">{Number(candidate.lat).toFixed(6)}, {Number(candidate.lng).toFixed(6)}{closeDistance ? ` - ${Number(candidate.distance_km).toFixed(1)} km aprox.` : ''}</p>
+          {duplicate && <p className="mt-1 text-xs font-semibold text-amber-700">Coincide con: {duplicate.name}</p>}
+        </div>
+        <div className="flex shrink-0 flex-col gap-2">
+          <button type="button" onClick={() => onSelect(candidate)} className="rounded-xl bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">Usar</button>
+          <button type="button" disabled={saving || !!duplicate} onClick={() => onSave(candidate)} className="rounded-xl bg-slate-950 px-3 py-2 text-xs font-bold text-white disabled:opacity-40">Guardar</button>
+          {url && <a href={url} target="_blank" rel="noreferrer" className="rounded-xl bg-slate-100 px-3 py-2 text-center text-xs font-bold text-slate-700">Ver mapa</a>}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export default function LocalMapAdmin() {
@@ -86,6 +147,12 @@ export default function LocalMapAdmin() {
   const [sectorForm, setSectorForm] = useState(EMPTY_SECTOR)
   const [editingStoreId, setEditingStoreId] = useState(null)
   const [editingSectorId, setEditingSectorId] = useState(null)
+  const [searchForm, setSearchForm] = useState(EMPTY_SEARCH)
+  const [searchResults, setSearchResults] = useState([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [importForm, setImportForm] = useState(EMPTY_IMPORT)
+  const [importCandidates, setImportCandidates] = useState([])
+  const [importLoading, setImportLoading] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -100,6 +167,8 @@ export default function LocalMapAdmin() {
   }
 
   useEffect(() => { load() }, [])
+
+  const activeSectors = useMemo(() => sectors.filter(sector => sector.is_active !== false), [sectors])
 
   const availableTypes = useMemo(() => {
     return ['all', ...new Set(stores.map(store => store.type || 'otro').filter(Boolean))]
@@ -118,16 +187,15 @@ export default function LocalMapAdmin() {
 
   const filteredSectors = useMemo(() => {
     const q = normalize(sectorQuery)
-    return sectors
-      .filter(sector => sector.is_active !== false)
+    return activeSectors
       .filter(sector => !q || normalize(`${sector.commune} ${sector.name}`).includes(q))
       .slice(0, 120)
-  }, [sectors, sectorQuery])
+  }, [activeSectors, sectorQuery])
 
   const nearbyStores = useMemo(() => {
     if (!position) return []
     return stores
-      .filter(store => store.is_active !== false)
+      .filter(store => store.is_active !== false && hasCoords(store))
       .map(store => ({ ...store, distance_m: distanceMeters(position, { lat: store.latitude, lng: store.longitude }) }))
       .filter(store => store.distance_m != null)
       .sort((a, b) => a.distance_m - b.distance_m)
@@ -136,12 +204,12 @@ export default function LocalMapAdmin() {
 
   const nearestSector = useMemo(() => {
     if (!position) return null
-    return sectors
-      .filter(sector => sector.is_active !== false)
+    return activeSectors
+      .filter(hasCoords)
       .map(sector => ({ ...sector, distance_m: distanceMeters(position, { lat: sector.latitude, lng: sector.longitude }) }))
       .filter(sector => sector.distance_m != null)
       .sort((a, b) => a.distance_m - b.distance_m)[0] || null
-  }, [sectors, position])
+  }, [activeSectors, position])
 
   const sectorDetection = useMemo(() => {
     if (!position || !nearestSector) return null
@@ -153,9 +221,13 @@ export default function LocalMapAdmin() {
     }
     return {
       type: 'ok',
-      text: `${nearestSector.name} · ${formatDistance(nearestSector.distance_m)}`,
+      text: `${nearestSector.name} - ${formatDistance(nearestSector.distance_m)}`,
     }
   }, [nearestSector, position])
+
+  function sectorFromName(value) {
+    return activeSectors.find(item => item.name === value || item.id === value)
+  }
 
   function useCurrentLocation(target = 'store') {
     if (!navigator.geolocation) return setMessage({ type: 'error', text: 'Tu navegador no permite geolocalizacion.' })
@@ -165,13 +237,135 @@ export default function LocalMapAdmin() {
         const lng = Number(current.coords.longitude).toFixed(7)
         const pos = { lat: Number(lat), lng: Number(lng) }
         setPosition(pos)
-        if (target === 'store') setStoreForm(prev => ({ ...prev, latitude: lat, longitude: lng }))
+        if (target === 'store') setStoreForm(prev => ({ ...prev, latitude: lat, longitude: lng, location_source: 'admin_current_location' }))
         if (target === 'sector') setSectorForm(prev => ({ ...prev, latitude: lat, longitude: lng }))
         setMessage({ type: 'ok', text: `Ubicacion capturada: ${lat}, ${lng}` })
       },
       () => setMessage({ type: 'error', text: 'No se pudo obtener ubicacion. Revisa permisos del navegador.' }),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     )
+  }
+
+  async function fetchOsm(params) {
+    const response = await fetch(`/api/nearby-osm?${params.toString()}`)
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || 'No se pudo consultar OpenStreetMap.')
+    return {
+      ...data,
+      places: (data.places || []).filter(place => isValidCoordinate(place.lat, place.lng) && (place.distance_km == null || Number(place.distance_km) <= 50)),
+    }
+  }
+
+  async function searchOsmBusinesses(event) {
+    event.preventDefault()
+    if (!searchForm.name.trim() && !searchForm.address.trim() && !searchForm.commune.trim()) {
+      setMessage({ type: 'error', text: 'Escribe al menos nombre, comuna o direccion para buscar.' })
+      return
+    }
+
+    setSearchLoading(true)
+    setSearchResults([])
+    setMessage(null)
+    try {
+      const params = new URLSearchParams({
+        mode: 'search',
+        query: searchForm.name,
+        address: searchForm.address,
+        commune: searchForm.commune,
+        type: searchForm.type,
+        limit: '16',
+      })
+      const data = await fetchOsm(params)
+      setSearchResults(data.places)
+      setMessage({ type: data.places.length ? 'ok' : 'error', text: data.places.length ? 'Candidatos encontrados. Revisa antes de guardar.' : 'No encontramos candidatos reales con coordenadas para esa busqueda.' })
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message })
+    } finally {
+      setSearchLoading(false)
+    }
+  }
+
+  async function searchImportCandidates(event) {
+    event.preventDefault()
+    if (!importForm.commune.trim()) {
+      setMessage({ type: 'error', text: 'Indica una comuna para importar candidatos.' })
+      return
+    }
+
+    setImportLoading(true)
+    setImportCandidates([])
+    setMessage(null)
+    try {
+      const params = new URLSearchParams({
+        mode: 'import',
+        commune: importForm.commune,
+        type: importForm.type,
+        radius_m: '12000',
+        limit: '30',
+      })
+      const data = await fetchOsm(params)
+      setImportCandidates(data.places)
+      setMessage({ type: data.places.length ? 'ok' : 'error', text: data.places.length ? 'Candidatos listos para revisar. Guarda solo los que correspondan.' : 'No encontramos negocios conocidos con coordenadas para esa comuna y tipo.' })
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message })
+    } finally {
+      setImportLoading(false)
+    }
+  }
+
+  function selectCandidate(candidate, preferredSector = '') {
+    const sectorName = preferredSector || candidate.sector || storeForm.sector
+    setStoreForm(prev => ({
+      ...prev,
+      name: candidate.name || prev.name,
+      type: mapOsmType(candidate.type),
+      sector: sectorName,
+      address: candidate.address || prev.address,
+      latitude: String(candidate.lat || ''),
+      longitude: String(candidate.lng || ''),
+      is_verified: false,
+      location_source: candidate.source || 'osm',
+    }))
+    setMessage({ type: 'ok', text: 'Candidato cargado en el formulario. Revisa datos y guarda.' })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  async function saveCandidate(candidate, preferredSector = '') {
+    const duplicate = duplicateForCandidate(candidate, stores)
+    if (duplicate) {
+      setMessage({ type: 'error', text: `No se guardo: parece duplicado de ${duplicate.name}.` })
+      return
+    }
+
+    const sector = sectorFromName(preferredSector || candidate.sector || '')
+    const payload = {
+      name: candidate.name.trim(),
+      normalized_name: normalize(candidate.name),
+      chain: null,
+      type: mapOsmType(candidate.type),
+      sector: sector?.name || preferredSector || candidate.sector || 'Sin sector',
+      sector_id: sector?.id || null,
+      address: candidate.address || null,
+      ...coordinatePayload(candidate.lat, candidate.lng),
+      location_source: candidate.source || 'osm',
+      is_verified: false,
+      is_active: true,
+      updated_at: new Date().toISOString(),
+    }
+
+    setSaving(true)
+    const result = await supabase.from('stores').insert(payload).select('id').single()
+    if (!result.error && result.data?.id) {
+      await supabase
+        .from('store_aliases')
+        .insert({ store_id: result.data.id, alias: payload.name, alias_key: normalize(payload.name), created_by: user?.id || null })
+        .then(() => {})
+    }
+    setSaving(false)
+
+    if (result.error) return setMessage({ type: 'error', text: result.error.message })
+    setMessage({ type: 'ok', text: `${candidate.name} guardado como negocio pendiente de verificacion.` })
+    await load()
   }
 
   async function saveSector(event) {
@@ -197,7 +391,7 @@ export default function LocalMapAdmin() {
     if (result.error) return setMessage({ type: 'error', text: result.error.message })
     setSectorForm({ ...EMPTY_SECTOR, commune: sectorForm.commune || 'Rancagua' })
     setEditingSectorId(null)
-    setMessage({ type: 'ok', text: editingSectorId ? 'Sector actualizado.' : 'Sector guardado. Ahora puedes asociar negocios a ese sector.' })
+    setMessage({ type: 'ok', text: editingSectorId ? 'Sector actualizado.' : 'Sector guardado.' })
     await load()
   }
 
@@ -205,7 +399,19 @@ export default function LocalMapAdmin() {
     event.preventDefault()
     setSaving(true)
     setMessage(null)
-    const sector = sectors.find(item => item.name === storeForm.sector || item.id === storeForm.sector)
+
+    const coords = coordinatePayload(storeForm.latitude, storeForm.longitude)
+    const duplicate = !editingStoreId
+      ? duplicateForCandidate({ name: storeForm.name, lat: coords.latitude, lng: coords.longitude }, stores)
+      : null
+
+    if (duplicate) {
+      setSaving(false)
+      setMessage({ type: 'error', text: `No se guardo: parece duplicado de ${duplicate.name}.` })
+      return
+    }
+
+    const sector = sectorFromName(storeForm.sector)
     const payload = {
       name: storeForm.name.trim(),
       normalized_name: normalize(storeForm.name),
@@ -214,8 +420,8 @@ export default function LocalMapAdmin() {
       sector: sector?.name || storeForm.sector || 'Sin sector',
       sector_id: sector?.id || null,
       address: storeForm.address.trim() || null,
-      ...coordinatePayload(storeForm.latitude, storeForm.longitude),
-      location_source: 'admin',
+      ...coords,
+      location_source: storeForm.location_source || 'admin',
       is_verified: Boolean(storeForm.is_verified),
       is_active: true,
       updated_at: new Date().toISOString(),
@@ -271,6 +477,7 @@ export default function LocalMapAdmin() {
       latitude: store.latitude || '',
       longitude: store.longitude || '',
       is_verified: store.is_verified ?? true,
+      location_source: store.location_source || 'admin',
     })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -308,18 +515,7 @@ export default function LocalMapAdmin() {
       <section className="rounded-[2rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 p-5 text-white shadow-xl">
         <p className="text-xs font-bold uppercase tracking-[0.25em] text-blue-100">PriceNow Local Intelligence</p>
         <h1 className="mt-2 text-2xl font-black">Negocios y sectores</h1>
-        <p className="mt-2 text-sm text-blue-50">Agrega supermercados, almacenes y poblaciones con coordenadas reales para que PriceNow calcule distancias correctas.</p>
-      </section>
-
-      <section className="rounded-[2rem] border border-blue-100 bg-blue-50 p-4 text-sm text-blue-950">
-        <h2 className="font-black">Como se corrigen las distancias</h2>
-        <p className="mt-2 leading-relaxed">La distancia no se escribe manualmente. PriceNow compara la ubicacion del usuario con la latitud y longitud del negocio usando Haversine.</p>
-        <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs leading-relaxed text-blue-900">
-          <li>Crea o edita el sector/poblacion.</li>
-          <li>Crea o edita el negocio y asignalo al sector correcto.</li>
-          <li>Agrega latitud y longitud reales, o usa tu ubicacion actual si estas en el lugar.</li>
-          <li>Marca el negocio como verificado cuando la coordenada sea confiable.</li>
-        </ol>
+        <p className="mt-2 text-sm text-blue-50">Busca negocios reales en OpenStreetMap, revisa duplicados y guarda solo coordenadas confiables.</p>
       </section>
 
       {message && <div className={`rounded-2xl border p-3 text-sm font-semibold ${message.type === 'error' ? 'border-red-100 bg-red-50 text-red-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>{message.text}</div>}
@@ -327,26 +523,61 @@ export default function LocalMapAdmin() {
       <section className="grid gap-3 sm:grid-cols-3">
         <button type="button" onClick={() => useCurrentLocation('store')} className="rounded-3xl bg-slate-950 p-4 text-left text-white shadow-sm">
           <p className="text-sm font-black">Usar mi ubicacion actual</p>
-          <p className="mt-1 text-xs text-white/70">Rellena latitud/longitud del formulario de negocio.</p>
+          <p className="mt-1 text-xs text-white/70">Rellena coordenadas del negocio si estas en el lugar.</p>
         </button>
         <button type="button" onClick={() => useCurrentLocation('sector')} className="rounded-3xl bg-blue-600 p-4 text-left text-white shadow-sm">
           <p className="text-sm font-black">Usar ubicacion para sector</p>
-          <p className="mt-1 text-xs text-white/70">Rellena latitud/longitud del sector o poblacion.</p>
+          <p className="mt-1 text-xs text-white/70">Rellena coordenadas del sector o poblacion.</p>
         </button>
         <div className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm">
           <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Sector detectado</p>
           <p className={`mt-1 font-black ${sectorDetection?.type === 'warning' ? 'text-amber-700' : 'text-slate-900'}`}>
             {sectorDetection?.text || 'Sin ubicacion o sectores con coordenadas validas'}
           </p>
-          <p className="mt-1 text-xs text-slate-500">Completa coordenadas para que la app detecte mejor la zona.</p>
+          <p className="mt-1 text-xs text-slate-500">Los sectores sin coordenadas validas se ignoran.</p>
         </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-blue-100 bg-white p-4 shadow-sm">
+        <form onSubmit={searchOsmBusinesses}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="font-black text-slate-900">Buscar negocio real</h2>
+              <FieldHint>Busca por nombre, comuna o direccion. Los resultados vienen de OSM y se revisan antes de guardar.</FieldHint>
+            </div>
+            <StatusPill tone="blue">{searchResults.length}</StatusPill>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <input value={searchForm.name} onChange={e => setSearchForm({ ...searchForm, name: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Nombre del negocio" />
+            <input value={searchForm.commune} onChange={e => setSearchForm({ ...searchForm, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna" />
+            <input value={searchForm.address} onChange={e => setSearchForm({ ...searchForm, address: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm sm:col-span-2" placeholder="Direccion o referencia" />
+            <select value={searchForm.type} onChange={e => setSearchForm({ ...searchForm, type: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
+              {STORE_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
+            </select>
+            <button disabled={searchLoading} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{searchLoading ? 'Buscando...' : 'Buscar en OSM'}</button>
+          </div>
+        </form>
+        {searchResults.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {searchResults.map(candidate => (
+              <CandidateCard
+                key={candidate.id}
+                candidate={candidate}
+                duplicate={duplicateForCandidate(candidate, stores)}
+                saving={saving}
+                onSelect={selectCandidate}
+                onSave={saveCandidate}
+              />
+            ))}
+          </div>
+        )}
       </section>
 
       <form onSubmit={saveStore} className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="font-black text-slate-900">{editingStoreId ? 'Editar negocio y coordenadas' : 'Agregar negocio con coordenadas'}</h2>
-            <FieldHint>Para corregir distancia, completa latitud y longitud. Si ya existe, usa Editar en la lista de abajo.</FieldHint>
+            <h2 className="font-black text-slate-900">{editingStoreId ? 'Editar negocio' : 'Agregar negocio'}</h2>
+            <FieldHint>Usa primero la busqueda OSM cuando sea posible. Las coordenadas quedan en opciones avanzadas.</FieldHint>
           </div>
           {editingStoreId && <button type="button" onClick={cancelStoreEdit} className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">Cancelar</button>}
         </div>
@@ -360,38 +591,79 @@ export default function LocalMapAdmin() {
           </div>
           <select value={storeForm.sector} onChange={e => setStoreForm({ ...storeForm, sector: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
             <option value="">Seleccionar sector/poblacion</option>
-            {sectors.filter(sector => sector.is_active !== false).map(sector => <option key={sector.id} value={sector.name}>{sector.commune} · {sector.name}</option>)}
+            {activeSectors.map(sector => <option key={sector.id} value={sector.name}>{sector.commune} - {sector.name}</option>)}
           </select>
           <input value={storeForm.address} onChange={e => setStoreForm({ ...storeForm, address: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Direccion" />
-          <div className="grid grid-cols-2 gap-2">
-            <label className="grid gap-1 text-xs font-bold text-slate-500">Latitud del negocio
-              <input value={storeForm.latitude} onChange={e => setStoreForm({ ...storeForm, latitude: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-34.1700000" inputMode="decimal" />
-            </label>
-            <label className="grid gap-1 text-xs font-bold text-slate-500">Longitud del negocio
-              <input value={storeForm.longitude} onChange={e => setStoreForm({ ...storeForm, longitude: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-70.7400000" inputMode="decimal" />
-            </label>
+
+          <div className={`rounded-2xl px-3 py-2 text-xs font-semibold ${currentStoreMapUrl ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+            {currentStoreMapUrl ? 'Coordenadas validas cargadas.' : 'Sin coordenadas validas. Latitud/longitud vacias o 0,0 no cuentan como ubicacion real.'}
           </div>
-          {!currentStoreMapUrl && <p className="rounded-2xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">Sin coordenadas validas. Completa latitud y longitud reales; 0,0 no cuenta como ubicacion valida.</p>}
+
+          <details className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
+            <summary className="cursor-pointer text-sm font-black text-slate-700">Opciones avanzadas</summary>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <label className="grid gap-1 text-xs font-bold text-slate-500">Latitud del negocio
+                <input value={storeForm.latitude} onChange={e => setStoreForm({ ...storeForm, latitude: e.target.value, location_source: 'admin' })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-34.1700000" inputMode="decimal" />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-slate-500">Longitud del negocio
+                <input value={storeForm.longitude} onChange={e => setStoreForm({ ...storeForm, longitude: e.target.value, location_source: 'admin' })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-70.7400000" inputMode="decimal" />
+              </label>
+            </div>
+          </details>
+
           <label className="flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3 text-sm font-bold text-slate-700">
             Marcar negocio como verificado
             <input type="checkbox" checked={!!storeForm.is_verified} onChange={e => setStoreForm({ ...storeForm, is_verified: e.target.checked })} />
           </label>
           <div className="grid gap-2 sm:grid-cols-2">
             <button disabled={saving} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{editingStoreId ? 'Guardar cambios del negocio' : 'Guardar negocio'}</button>
-            {currentStoreMapUrl ? (
-              <a href={currentStoreMapUrl} target="_blank" rel="noreferrer" className="rounded-2xl bg-slate-100 px-4 py-3 text-center text-sm font-black text-slate-700">Ver en mapa</a>
-            ) : (
-              <span className="rounded-2xl bg-slate-50 px-4 py-3 text-center text-sm font-bold text-slate-400">Sin coordenadas validas</span>
-            )}
+            {currentStoreMapUrl && <a href={currentStoreMapUrl} target="_blank" rel="noreferrer" className="rounded-2xl bg-slate-100 px-4 py-3 text-center text-sm font-black text-slate-700">Ver en mapa</a>}
           </div>
         </div>
       </form>
+
+      <section className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
+        <form onSubmit={searchImportCandidates}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="font-black text-slate-900">Importar negocios conocidos</h2>
+              <FieldHint>Busca candidatos reales por comuna y tipo. PriceNow muestra duplicados posibles antes de guardar.</FieldHint>
+            </div>
+            <StatusPill tone="blue">{importCandidates.length}</StatusPill>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-4">
+            <input value={importForm.commune} onChange={e => setImportForm({ ...importForm, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna" />
+            <select value={importForm.type} onChange={e => setImportForm({ ...importForm, type: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
+              {STORE_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
+            </select>
+            <select value={importForm.sector} onChange={e => setImportForm({ ...importForm, sector: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
+              <option value="">Sector opcional</option>
+              {activeSectors.map(sector => <option key={sector.id} value={sector.name}>{sector.commune} - {sector.name}</option>)}
+            </select>
+            <button disabled={importLoading} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{importLoading ? 'Buscando...' : 'Buscar candidatos'}</button>
+          </div>
+        </form>
+        {importCandidates.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {importCandidates.map(candidate => (
+              <CandidateCard
+                key={candidate.id}
+                candidate={candidate}
+                duplicate={duplicateForCandidate(candidate, stores)}
+                saving={saving}
+                onSelect={item => selectCandidate(item, importForm.sector)}
+                onSave={item => saveCandidate(item, importForm.sector)}
+              />
+            ))}
+          </div>
+        )}
+      </section>
 
       <form onSubmit={saveSector} className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-black text-slate-900">{editingSectorId ? 'Editar sector o poblacion' : 'Agregar sector o poblacion'}</h2>
-            <FieldHint>El radio define que tan amplia es la zona. Para una poblacion chica usa 600 a 900 m; para un sector grande usa 1200 a 1800 m.</FieldHint>
+            <FieldHint>Los sectores sin coordenadas validas se guardan, pero no se usan para detectar zona.</FieldHint>
           </div>
           {editingSectorId && <button type="button" onClick={cancelSectorEdit} className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">Cancelar</button>}
         </div>
@@ -400,25 +672,26 @@ export default function LocalMapAdmin() {
             <input value={sectorForm.commune} onChange={e => setSectorForm({ ...sectorForm, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna" />
             <input required value={sectorForm.name} onChange={e => setSectorForm({ ...sectorForm, name: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Sector / poblacion" />
           </div>
-          <div className="grid grid-cols-3 gap-2">
-            <label className="grid gap-1 text-xs font-bold text-slate-500">Latitud
-              <input value={sectorForm.latitude} onChange={e => setSectorForm({ ...sectorForm, latitude: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-34.1700000" inputMode="decimal" />
-            </label>
-            <label className="grid gap-1 text-xs font-bold text-slate-500">Longitud
-              <input value={sectorForm.longitude} onChange={e => setSectorForm({ ...sectorForm, longitude: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-70.7400000" inputMode="decimal" />
-            </label>
-            <label className="grid gap-1 text-xs font-bold text-slate-500">Radio m
-              <input value={sectorForm.radius_m} onChange={e => setSectorForm({ ...sectorForm, radius_m: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="900" inputMode="numeric" />
-            </label>
+          <div className={`rounded-2xl px-3 py-2 text-xs font-semibold ${currentSectorMapUrl ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+            {currentSectorMapUrl ? 'Coordenadas validas cargadas.' : 'Sin coordenadas validas. Este sector no se usara para detectar zona.'}
           </div>
-          {!currentSectorMapUrl && <p className="rounded-2xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">Sin coordenadas validas. Este sector no se usara para deteccion hasta completar latitud y longitud reales.</p>}
+          <details className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
+            <summary className="cursor-pointer text-sm font-black text-slate-700">Opciones avanzadas</summary>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <label className="grid gap-1 text-xs font-bold text-slate-500">Latitud
+                <input value={sectorForm.latitude} onChange={e => setSectorForm({ ...sectorForm, latitude: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-34.1700000" inputMode="decimal" />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-slate-500">Longitud
+                <input value={sectorForm.longitude} onChange={e => setSectorForm({ ...sectorForm, longitude: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="-70.7400000" inputMode="decimal" />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-slate-500">Radio m
+                <input value={sectorForm.radius_m} onChange={e => setSectorForm({ ...sectorForm, radius_m: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm font-normal text-slate-900" placeholder="900" inputMode="numeric" />
+              </label>
+            </div>
+          </details>
           <div className="grid gap-2 sm:grid-cols-2">
             <button disabled={saving} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{editingSectorId ? 'Guardar cambios del sector' : 'Guardar sector'}</button>
-            {currentSectorMapUrl ? (
-              <a href={currentSectorMapUrl} target="_blank" rel="noreferrer" className="rounded-2xl bg-slate-100 px-4 py-3 text-center text-sm font-black text-slate-700">Ver en mapa</a>
-            ) : (
-              <span className="rounded-2xl bg-slate-50 px-4 py-3 text-center text-sm font-bold text-slate-400">Sin coordenadas validas</span>
-            )}
+            {currentSectorMapUrl && <a href={currentSectorMapUrl} target="_blank" rel="noreferrer" className="rounded-2xl bg-slate-100 px-4 py-3 text-center text-sm font-black text-slate-700">Ver en mapa</a>}
           </div>
         </div>
       </form>
@@ -434,7 +707,7 @@ export default function LocalMapAdmin() {
             <div key={store.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3">
               <div className="min-w-0">
                 <p className="truncate font-bold text-slate-900">{store.name}</p>
-                <p className="truncate text-xs text-slate-500">{store.sector || 'Sin sector'} · {store.type || 'negocio'}</p>
+                <p className="truncate text-xs text-slate-500">{store.sector || 'Sin sector'} - {store.type || 'negocio'}</p>
               </div>
               <span className="shrink-0 text-sm font-black text-blue-600">{formatDistance(store.distance_m)}</span>
             </div>
@@ -446,7 +719,7 @@ export default function LocalMapAdmin() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-black text-slate-900">Editar negocios existentes</h2>
-            <FieldHint>Busca un negocio, filtra por coordenadas o verificacion, corrige direccion/coordenadas y guarda.</FieldHint>
+            <FieldHint>Filtra por coordenadas o verificacion, corrige datos y marca como verificado cuando corresponda.</FieldHint>
           </div>
           <StatusPill>{filteredStores.length}</StatusPill>
         </div>
@@ -479,8 +752,8 @@ export default function LocalMapAdmin() {
                         {hasCoords(store) ? <StatusPill tone="green">Con coordenadas</StatusPill> : <StatusPill tone="amber">Sin coordenadas validas</StatusPill>}
                         {store.is_verified ? <StatusPill tone="green">Verificado</StatusPill> : <StatusPill>Sin verificar</StatusPill>}
                       </div>
-                      <p className="mt-1 text-xs text-slate-500">{store.sector || 'Sin sector'} · {store.address || 'Sin direccion'} · {store.type || 'negocio'}</p>
-                      <p className="mt-1 text-xs text-slate-400">{hasCoords(store) ? `${store.latitude}, ${store.longitude}` : 'Sin coordenadas validas. Edita latitud y longitud o usa tu ubicacion actual.'}</p>
+                      <p className="mt-1 text-xs text-slate-500">{store.sector || 'Sin sector'} - {store.address || 'Sin direccion'} - {store.type || 'negocio'}</p>
+                      <p className={`mt-1 text-xs ${hasCoords(store) ? 'text-slate-400' : 'font-semibold text-amber-700'}`}>{hasCoords(store) ? `${store.latitude}, ${store.longitude}` : 'Sin coordenadas validas.'}</p>
                     </div>
                     <div className="flex shrink-0 flex-col gap-2">
                       <button type="button" onClick={() => editStore(store)} className="rounded-xl bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">Editar</button>
@@ -500,7 +773,7 @@ export default function LocalMapAdmin() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-black text-slate-900">Editar sectores y poblaciones</h2>
-            <FieldHint>Los sectores ayudan a detectar la zona del usuario y ordenar negocios por cercania.</FieldHint>
+            <FieldHint>Los sectores con coordenadas invalidas muestran advertencia y no participan en deteccion.</FieldHint>
           </div>
           <StatusPill>{filteredSectors.length}</StatusPill>
         </div>
@@ -516,8 +789,8 @@ export default function LocalMapAdmin() {
                       <p className="font-bold text-slate-900">{sector.name}</p>
                       {hasCoords(sector) ? <StatusPill tone="green">Con coordenadas</StatusPill> : <StatusPill tone="amber">Sin coordenadas validas</StatusPill>}
                     </div>
-                    <p className="mt-1 text-xs text-slate-500">{sector.commune || 'Sin comuna'} · radio {sector.radius_m || 900} m</p>
-                    <p className="mt-1 text-xs text-amber-600">{hasCoords(sector) ? `${sector.latitude}, ${sector.longitude}` : 'Advertencia: este sector no tiene coordenadas validas. No se usara para detectar zona.'}</p>
+                    <p className="mt-1 text-xs text-slate-500">{sector.commune || 'Sin comuna'} - radio {sector.radius_m || 900} m</p>
+                    <p className={`mt-1 text-xs ${hasCoords(sector) ? 'text-slate-400' : 'font-semibold text-amber-700'}`}>{hasCoords(sector) ? `${sector.latitude}, ${sector.longitude}` : 'Advertencia: este sector no tiene coordenadas validas.'}</p>
                   </div>
                   <div className="flex shrink-0 flex-col gap-2">
                     <button type="button" onClick={() => editSector(sector)} className="rounded-xl bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">Editar</button>
