@@ -5,6 +5,12 @@ import { useAuth } from '../context/AuthContext'
 
 const NEARBY_RADIUS_M = 8000
 const MAX_SECTOR_DETECTION_M = 50000
+const OSM_RADII_M = [1500, 3000, 5000]
+const OSM_LIMIT = 12
+
+function normalize(text = '') {
+  return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
 
 function isValidCoordinate(lat, lng) {
   if (lat === null || lat === undefined || lng === null || lng === undefined) return false
@@ -38,6 +44,55 @@ function hasCoords(row) {
   return isValidCoordinate(row?.latitude, row?.longitude)
 }
 
+function mapOsmType(type = '') {
+  const key = normalize(type)
+  if (key.includes('supermarket')) return 'supermercado'
+  if (key.includes('wholesale')) return 'mayorista'
+  if (key.includes('convenience')) return 'minimarket'
+  if (key.includes('bakery')) return 'panaderia'
+  if (key.includes('butcher')) return 'carniceria'
+  if (key.includes('greengrocer')) return 'verduleria'
+  if (key.includes('marketplace')) return 'feria'
+  if (key.includes('pharmacy') || key.includes('chemist')) return 'farmacia'
+  return 'negocio'
+}
+
+function isOptionalSourceError(error) {
+  const message = error?.message || ''
+  return /source/i.test(message) && /(column|schema cache|could not find)/i.test(message)
+}
+
+function duplicateByNameAndDistance(candidate, list) {
+  const candidateName = normalize(candidate?.name)
+  if (!candidateName) return false
+  const candidatePoint = { lat: candidate.latitude ?? candidate.lat, lng: candidate.longitude ?? candidate.lng }
+  return list.some(store => {
+    const storeName = normalize(store.name)
+    if (!storeName) return false
+    const sameName = candidateName === storeName
+    const similarName = sameName || (candidateName.length > 5 && storeName.length > 5 && (candidateName.includes(storeName) || storeName.includes(candidateName)))
+    if (!similarName) return false
+    const distance = distanceMeters(candidatePoint, { lat: store.latitude ?? store.lat, lng: store.longitude ?? store.lng })
+    return distance != null && distance < 300
+  })
+}
+
+function osmPlaceToStore(place) {
+  return {
+    id: `osm-${place.id}`,
+    osm_id: place.id,
+    name: place.name,
+    type: mapOsmType(place.type),
+    address: place.address || '',
+    sector: place.sector || place.commune || '',
+    latitude: Number(place.lat),
+    longitude: Number(place.lng),
+    source: 'osm',
+    is_osm: true,
+    is_verified: false,
+  }
+}
+
 function readFlexiblePoints(row) {
   const value = row?.balance ?? row?.points ?? row?.total_points ?? row?.current_points ?? 0
   const number = Number(value)
@@ -65,6 +120,10 @@ export default function Home() {
   const [position, setPosition] = useState(null)
   const [locationStatus, setLocationStatus] = useState('idle')
   const [stores, setStores] = useState([])
+  const [osmStores, setOsmStores] = useState([])
+  const [osmStatus, setOsmStatus] = useState({ state: 'idle', radius: null })
+  const [savingOsmId, setSavingOsmId] = useState(null)
+  const [localMessage, setLocalMessage] = useState(null)
   const [sectors, setSectors] = useState([])
   const [stats, setStats] = useState({ today: 0, points: 0 })
 
@@ -107,6 +166,43 @@ export default function Home() {
 
   useEffect(() => { load() }, [user?.id])
 
+  async function fetchOsmNearby(origin) {
+    setOsmStatus({ state: 'loading', radius: null })
+    setOsmStores([])
+
+    let lastError = null
+    for (const radius of OSM_RADII_M) {
+      try {
+        const params = new URLSearchParams({
+          mode: 'nearby',
+          lat: String(origin.lat),
+          lng: String(origin.lng),
+          radius_m: String(radius),
+          type: 'all',
+          limit: String(OSM_LIMIT),
+        })
+        const response = await fetch(`/api/nearby-osm?${params.toString()}`)
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(data.error || 'No se pudo consultar OpenStreetMap.')
+
+        const places = (data.places || [])
+          .filter(place => isValidCoordinate(place.lat, place.lng))
+          .filter(place => place.distance_km == null || Number(place.distance_km) * 1000 <= radius + 50)
+          .map(osmPlaceToStore)
+
+        if (places.length > 0) {
+          setOsmStores(places)
+          setOsmStatus({ state: 'ok', radius })
+          return
+        }
+      } catch (err) {
+        lastError = err
+      }
+    }
+
+    setOsmStatus({ state: lastError ? 'error' : 'empty', radius: OSM_RADII_M[OSM_RADII_M.length - 1] })
+  }
+
   useEffect(() => {
     if (!navigator.permissions || !navigator.geolocation) return
     navigator.permissions.query({ name: 'geolocation' }).then(permission => {
@@ -122,26 +218,106 @@ export default function Home() {
     setLocationStatus('loading')
     navigator.geolocation.getCurrentPosition(
       current => {
-        setPosition({
+        const nextPosition = {
           lat: Number(current.coords.latitude),
           lng: Number(current.coords.longitude),
           accuracy: Math.round(current.coords.accuracy || 0),
-        })
+        }
+        setPosition(nextPosition)
         setLocationStatus('ok')
+        fetchOsmNearby(nextPosition)
       },
       () => setLocationStatus('error'),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     )
   }
 
-  const nearbyStores = useMemo(() => {
+  async function insertStore(payload) {
+    let result = await supabase.from('stores').insert(payload).select('id').single()
+    if (result.error && payload.source && isOptionalSourceError(result.error)) {
+      const { source, ...fallbackPayload } = payload
+      result = await supabase.from('stores').insert(fallbackPayload).select('id').single()
+    }
+    return result
+  }
+
+  async function saveOsmStore(store) {
+    if (duplicateByNameAndDistance(store, stores)) {
+      setLocalMessage({ type: 'error', text: 'Ese negocio parece estar duplicado en PriceNow.' })
+      return
+    }
+
+    setSavingOsmId(store.id)
+    setLocalMessage(null)
+    const payload = {
+      name: store.name.trim(),
+      normalized_name: normalize(store.name),
+      chain: null,
+      type: store.type || 'negocio',
+      sector: store.sector || 'Sin sector',
+      sector_id: null,
+      address: store.address || null,
+      latitude: Number(store.latitude),
+      longitude: Number(store.longitude),
+      source: 'osm',
+      location_source: 'osm',
+      is_verified: false,
+      is_active: true,
+      updated_at: new Date().toISOString(),
+    }
+
+    const result = await insertStore(payload)
+    if (!result.error && result.data?.id) {
+      await supabase
+        .from('store_aliases')
+        .insert({ store_id: result.data.id, alias: payload.name, alias_key: normalize(payload.name), created_by: user?.id || null })
+        .then(() => {})
+    }
+
+    setSavingOsmId(null)
+    if (result.error) {
+      setLocalMessage({ type: 'error', text: result.error.message })
+      return
+    }
+
+    setLocalMessage({ type: 'ok', text: `${store.name} guardado en PriceNow.` })
+    setOsmStores(prev => prev.filter(item => item.id !== store.id))
+    await load()
+  }
+
+  const supabaseNearbyStores = useMemo(() => {
     if (!position) return []
     return stores
-      .map(store => ({ ...store, distance_m: distanceMeters(position, { lat: store.latitude, lng: store.longitude }) }))
+      .map(store => ({
+        ...store,
+        source_label: 'Verificado PriceNow',
+        source_kind: 'pricenow',
+        distance_m: distanceMeters(position, { lat: store.latitude, lng: store.longitude }),
+      }))
       .filter(store => store.distance_m != null && store.distance_m <= NEARBY_RADIUS_M)
       .sort((a, b) => a.distance_m - b.distance_m)
-      .slice(0, 6)
   }, [stores, position])
+
+  const osmNearbyStores = useMemo(() => {
+    if (!position) return []
+    return osmStores
+      .map(store => ({
+        ...store,
+        source_label: 'Detectado por mapa',
+        source_kind: 'osm',
+        distance_m: distanceMeters(position, { lat: store.latitude, lng: store.longitude }),
+      }))
+      .filter(store => store.distance_m != null && store.distance_m <= OSM_RADII_M[OSM_RADII_M.length - 1])
+      .sort((a, b) => a.distance_m - b.distance_m)
+  }, [osmStores, position])
+
+  const nearbyStores = useMemo(() => {
+    const combined = []
+    ;[...supabaseNearbyStores, ...osmNearbyStores].forEach(store => {
+      if (!duplicateByNameAndDistance(store, combined)) combined.push(store)
+    })
+    return combined.sort((a, b) => a.distance_m - b.distance_m).slice(0, 3)
+  }, [supabaseNearbyStores, osmNearbyStores])
 
   const nearestSector = useMemo(() => {
     if (!position) return null
@@ -196,6 +372,7 @@ export default function Home() {
             Ubicacion activada{position?.accuracy ? `, precision aprox. ${position.accuracy} m` : ''}.
           </p>
         )}
+        {localMessage && <p className={`mt-3 rounded-2xl px-3 py-2 text-sm font-semibold ${localMessage.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{localMessage.text}</p>}
         {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicacion. Puedes seguir usando PriceNow sin compartirla.</p>}
         {sectorDetection?.type === 'ok' && <p className="mt-3 rounded-2xl bg-blue-50 px-3 py-2 text-sm text-blue-700">Sector probable: <b>{sectorDetection.name}</b>.</p>}
         {sectorDetection?.type === 'warning' && <p className="mt-3 rounded-2xl bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">{sectorDetection.text}</p>}
@@ -206,30 +383,43 @@ export default function Home() {
           </p>
         )}
 
-        {position && nearbyStores.length === 0 && (
+        {position && osmStatus.state === 'loading' && (
+          <p className="mt-3 rounded-2xl bg-blue-50 p-3 text-sm font-semibold text-blue-700">
+            Buscando negocios cercanos en el mapa...
+          </p>
+        )}
+
+        {position && osmStatus.state !== 'loading' && nearbyStores.length === 0 && (
           <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-            Aun no hay negocios con coordenadas reales cerca de esta ubicacion.
+            Aun no encontramos negocios cercanos con coordenadas reales en PriceNow ni en el mapa.
             {isValidator && <Link to="/local-map" className="mt-2 block font-black text-blue-600">Agregar negocios desde el mapa local</Link>}
           </div>
         )}
 
         {nearbyStores.length > 0 && (
-          <details className="mt-3 rounded-2xl bg-slate-50 p-3">
-            <summary className="cursor-pointer text-sm font-black text-slate-800">
-              {nearbyStores.length} negocios cercanos con coordenadas
-            </summary>
-            <div className="mt-3 space-y-2">
-              {nearbyStores.slice(0, 4).map(store => (
-                <div key={store.id} className="flex items-center justify-between gap-3 rounded-2xl bg-white p-3">
+          <div className="mt-3 space-y-2">
+            {nearbyStores.map(store => (
+              <div key={store.id} className="rounded-2xl bg-slate-50 p-3">
+                <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate font-bold text-slate-900">{store.name}</p>
-                    <p className="truncate text-xs text-slate-500">{store.sector || 'Sin sector'} · {store.type || store.chain || 'negocio'}</p>
+                    <p className="truncate text-xs text-slate-500">{store.type || store.chain || 'negocio'} - {store.source_label}</p>
+                    <p className="mt-1 text-xs font-black text-blue-600">{formatDistance(store.distance_m)}</p>
                   </div>
-                  <span className="shrink-0 text-sm font-black text-blue-600">{formatDistance(store.distance_m)}</span>
+                  {isValidator && store.source_kind === 'osm' && (
+                    <button
+                      type="button"
+                      onClick={() => saveOsmStore(store)}
+                      disabled={savingOsmId === store.id}
+                      className="shrink-0 rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white disabled:opacity-50"
+                    >
+                      {savingOsmId === store.id ? 'Guardando...' : 'Guardar en PriceNow'}
+                    </button>
+                  )}
                 </div>
-              ))}
-            </div>
-          </details>
+              </div>
+            ))}
+          </div>
         )}
       </section>
 

@@ -6,17 +6,24 @@ const OVERPASS_ENDPOINTS = [
 
 const NOMINATIM_ENDPOINT = 'https://nominatim.openstreetmap.org/search'
 
+const DEFAULT_BUSINESS_FILTER = {
+  shop: 'supermarket|convenience|bakery|butcher|greengrocer|wholesale',
+  amenity: 'marketplace|pharmacy',
+}
+
 const TYPE_FILTERS = {
-  supermercado: { shop: 'supermarket|wholesale' },
+  all: DEFAULT_BUSINESS_FILTER,
+  todos: DEFAULT_BUSINESS_FILTER,
+  supermercado: { shop: 'supermarket' },
   minimarket: { shop: 'convenience' },
-  almacen: { shop: 'convenience|general|supermarket' },
+  almacen: { shop: 'convenience' },
   panaderia: { shop: 'bakery' },
   carniceria: { shop: 'butcher' },
   verduleria: { shop: 'greengrocer' },
-  feria: { amenity: 'marketplace', shop: 'marketplace' },
-  mayorista: { shop: 'wholesale|supermarket' },
+  feria: { amenity: 'marketplace' },
+  mayorista: { shop: 'wholesale' },
   farmacia: { amenity: 'pharmacy', shop: 'chemist|pharmacy' },
-  otro: { shop: '.+', amenity: 'marketplace|pharmacy' },
+  otro: DEFAULT_BUSINESS_FILTER,
 }
 
 const KNOWN_LOCAL_BUSINESS_REGEX = 'lider|lider express|jumbo|tottus|unimarc|santa isabel|acuenta|cugat|mayorista|supermercado|minimarket|almacen|almac[eé]n|panader|carnicer|verduler|farmacia'
@@ -65,7 +72,7 @@ function escapeOverpassRegex(value = '') {
 }
 
 function typeFilter(type = 'otro') {
-  return TYPE_FILTERS[normalizeText(type)] || TYPE_FILTERS.otro
+  return TYPE_FILTERS[normalizeText(type)] || DEFAULT_BUSINESS_FILTER
 }
 
 function buildNameFilter(query) {

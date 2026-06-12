@@ -141,6 +141,9 @@ function formatLocation(location) {
 }
 
 const USERNAME_CHANGE_DAYS = 90
+const MAX_AVATAR_BYTES = 5 * 1024 * 1024
+const ALLOWED_AVATAR_TYPES = ['image/jpeg', 'image/png', 'image/webp']
+const ALLOWED_AVATAR_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp']
 
 function usernameChangeInfo(profile) {
   const lastChanged = profile?.username_last_changed_at ? new Date(profile.username_last_changed_at) : null
@@ -363,25 +366,28 @@ export default function Profile() {
     const file = event.target.files?.[0]
     if (!file || !user?.id) return
 
-    if (!file.type.startsWith('image/')) {
-      setProfileMessage({ type: 'error', text: 'Selecciona una imagen válida para tu foto de perfil.' })
+    const extension = file.name.split('.').pop()?.toLowerCase() || ''
+    const hasAllowedType = file.type ? ALLOWED_AVATAR_TYPES.includes(file.type) : true
+    const hasAllowedExtension = ALLOWED_AVATAR_EXTENSIONS.includes(extension)
+
+    if (!hasAllowedType || !hasAllowedExtension) {
+      setProfileMessage({ type: 'error', text: 'Selecciona una imagen jpg, jpeg, png o webp para tu foto de perfil.' })
       return
     }
 
-    if (file.size > 2 * 1024 * 1024) {
-      setProfileMessage({ type: 'error', text: 'La imagen debe pesar menos de 2 MB.' })
+    if (file.size > MAX_AVATAR_BYTES) {
+      setProfileMessage({ type: 'error', text: 'La imagen es demasiado pesada. Máximo permitido: 5 MB.' })
       return
     }
 
     setAvatarUploading(true)
     setProfileMessage(null)
 
-    const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg'
-    const filePath = `${user.id}/avatar-${Date.now()}.${extension}`
+    const filePath = `${user.id}/avatar-${Date.now()}.${extension || 'jpg'}`
 
     const { error: uploadError } = await supabase.storage
       .from('avatars')
-      .upload(filePath, file, { cacheControl: '3600', upsert: true })
+      .upload(filePath, file, { cacheControl: '3600', contentType: file.type || 'image/jpeg', upsert: true })
 
     if (uploadError) {
       setProfileMessage({ type: 'error', text: `No se pudo subir la imagen: ${uploadError.message}` })
@@ -524,7 +530,7 @@ export default function Profile() {
               <span className="absolute inset-x-0 bottom-0 bg-slate-950/55 py-1 text-center text-[10px] font-bold text-white opacity-0 transition-opacity group-hover:opacity-100">
                 Cambiar
               </span>
-              <input type="file" accept="image/*" onChange={uploadAvatar} className="hidden" />
+              <input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onChange={uploadAvatar} className="hidden" />
             </label>
             {avatarUploading && <p className="mt-2 text-center text-[10px] font-bold text-brand-600">Subiendo...</p>}
           </div>

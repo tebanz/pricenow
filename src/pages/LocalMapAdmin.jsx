@@ -3,12 +3,14 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 
 const STORE_TYPES = ['supermercado', 'minimarket', 'almacen', 'panaderia', 'carniceria', 'verduleria', 'feria', 'mayorista', 'farmacia', 'otro']
+const SEARCH_TYPES = ['all', ...STORE_TYPES]
 const MAX_SECTOR_DETECTION_M = 50000
 
 const EMPTY_STORE = { name: '', chain: '', type: 'supermercado', sector: '', address: '', latitude: '', longitude: '', is_verified: true, location_source: 'admin' }
 const EMPTY_SECTOR = { commune: 'Rancagua', name: '', latitude: '', longitude: '', radius_m: 900, is_active: true }
 const EMPTY_SEARCH = { name: '', commune: 'Rancagua', address: '', type: 'supermercado' }
 const EMPTY_IMPORT = { commune: 'Rancagua', type: 'supermercado', sector: '' }
+const EMPTY_NEARBY_SEARCH = { radius_m: '1500', type: 'all' }
 
 function normalize(text = '') {
   return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
@@ -26,6 +28,11 @@ function isValidCoordinate(lat, lng) {
 
 function hasCoords(row) {
   return isValidCoordinate(row?.latitude, row?.longitude)
+}
+
+function isOptionalSourceError(error) {
+  const message = error?.message || ''
+  return /source/i.test(message) && /(column|schema cache|could not find)/i.test(message)
 }
 
 function coordinatePayload(lat, lng) {
@@ -99,8 +106,8 @@ function duplicateForCandidate(candidate, stores, ignoreId = null) {
     const distance = distanceMeters(candidatePoint, { lat: store.latitude, lng: store.longitude })
 
     if (sameName && distance == null && !hasCoords(store)) return true
-    if (sameName && distance != null && distance <= 250) return true
-    if (similarName && distance != null && distance <= 150) return true
+    if (sameName && distance != null && distance < 300) return true
+    if (similarName && distance != null && distance < 300) return true
     return false
   }) || null
 }
@@ -153,6 +160,9 @@ export default function LocalMapAdmin() {
   const [importForm, setImportForm] = useState(EMPTY_IMPORT)
   const [importCandidates, setImportCandidates] = useState([])
   const [importLoading, setImportLoading] = useState(false)
+  const [nearbyForm, setNearbyForm] = useState(EMPTY_NEARBY_SEARCH)
+  const [nearbyCandidates, setNearbyCandidates] = useState([])
+  const [nearbyLoading, setNearbyLoading] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -239,6 +249,7 @@ export default function LocalMapAdmin() {
         setPosition(pos)
         if (target === 'store') setStoreForm(prev => ({ ...prev, latitude: lat, longitude: lng, location_source: 'admin_current_location' }))
         if (target === 'sector') setSectorForm(prev => ({ ...prev, latitude: lat, longitude: lng }))
+        if (target === 'nearby') setNearbyCandidates([])
         setMessage({ type: 'ok', text: `Ubicacion capturada: ${lat}, ${lng}` })
       },
       () => setMessage({ type: 'error', text: 'No se pudo obtener ubicacion. Revisa permisos del navegador.' }),
@@ -282,6 +293,37 @@ export default function LocalMapAdmin() {
       setMessage({ type: 'error', text: err.message })
     } finally {
       setSearchLoading(false)
+    }
+  }
+
+  async function searchNearbyOsmBusinesses(event) {
+    event.preventDefault()
+    if (!position) {
+      setMessage({ type: 'error', text: 'Primero usa tu ubicacion actual para buscar negocios cercanos.' })
+      return
+    }
+
+    setNearbyLoading(true)
+    setNearbyCandidates([])
+    setMessage(null)
+    try {
+      const params = new URLSearchParams({
+        mode: 'nearby',
+        lat: String(position.lat),
+        lng: String(position.lng),
+        radius_m: nearbyForm.radius_m,
+        type: nearbyForm.type,
+        limit: '24',
+      })
+      const data = await fetchOsm(params)
+      const radius = Number(nearbyForm.radius_m)
+      const places = data.places.filter(place => place.distance_km == null || Number(place.distance_km) * 1000 <= radius + 50)
+      setNearbyCandidates(places)
+      setMessage({ type: places.length ? 'ok' : 'error', text: places.length ? 'Resultados cercanos encontrados. Revisa duplicados antes de guardar.' : 'No encontramos negocios cercanos en ese radio.' })
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message })
+    } finally {
+      setNearbyLoading(false)
     }
   }
 
@@ -330,6 +372,15 @@ export default function LocalMapAdmin() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  async function insertStore(payload) {
+    let result = await supabase.from('stores').insert(payload).select('id').single()
+    if (result.error && payload.source && isOptionalSourceError(result.error)) {
+      const { source, ...fallbackPayload } = payload
+      result = await supabase.from('stores').insert(fallbackPayload).select('id').single()
+    }
+    return result
+  }
+
   async function saveCandidate(candidate, preferredSector = '') {
     const duplicate = duplicateForCandidate(candidate, stores)
     if (duplicate) {
@@ -347,14 +398,15 @@ export default function LocalMapAdmin() {
       sector_id: sector?.id || null,
       address: candidate.address || null,
       ...coordinatePayload(candidate.lat, candidate.lng),
-      location_source: candidate.source || 'osm',
+      source: 'osm',
+      location_source: 'osm',
       is_verified: false,
       is_active: true,
       updated_at: new Date().toISOString(),
     }
 
     setSaving(true)
-    const result = await supabase.from('stores').insert(payload).select('id').single()
+    const result = await insertStore(payload)
     if (!result.error && result.data?.id) {
       await supabase
         .from('store_aliases')
@@ -422,6 +474,7 @@ export default function LocalMapAdmin() {
       address: storeForm.address.trim() || null,
       ...coords,
       location_source: storeForm.location_source || 'admin',
+      ...(!editingStoreId && String(storeForm.location_source || '').includes('osm') ? { source: 'osm' } : {}),
       is_verified: Boolean(storeForm.is_verified),
       is_active: true,
       updated_at: new Date().toISOString(),
@@ -431,7 +484,7 @@ export default function LocalMapAdmin() {
     if (editingStoreId) {
       result = await supabase.from('stores').update(payload).eq('id', editingStoreId)
     } else {
-      result = await supabase.from('stores').insert(payload).select('id').single()
+      result = await insertStore(payload)
       if (!result.error && result.data?.id) {
         await supabase
           .from('store_aliases')
@@ -536,6 +589,45 @@ export default function LocalMapAdmin() {
           </p>
           <p className="mt-1 text-xs text-slate-500">Los sectores sin coordenadas validas se ignoran.</p>
         </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-blue-100 bg-white p-4 shadow-sm">
+        <form onSubmit={searchNearbyOsmBusinesses}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="font-black text-slate-900">Buscar negocios cercanos automaticamente</h2>
+              <FieldHint>Usa tu ubicacion actual y trae candidatos reales desde OpenStreetMap/Overpass.</FieldHint>
+            </div>
+            <StatusPill tone="blue">{nearbyCandidates.length}</StatusPill>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-4">
+            <button type="button" onClick={() => useCurrentLocation('nearby')} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white">Usar ubicacion actual</button>
+            <select value={nearbyForm.radius_m} onChange={e => setNearbyForm({ ...nearbyForm, radius_m: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
+              <option value="1500">1.5 km</option>
+              <option value="3000">3 km</option>
+              <option value="5000">5 km</option>
+            </select>
+            <select value={nearbyForm.type} onChange={e => setNearbyForm({ ...nearbyForm, type: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
+              {SEARCH_TYPES.map(type => <option key={type} value={type}>{type === 'all' ? 'Todos los tipos' : type}</option>)}
+            </select>
+            <button disabled={nearbyLoading || !position} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{nearbyLoading ? 'Buscando...' : 'Buscar negocios en mapa'}</button>
+          </div>
+          {position && <p className="mt-2 text-xs text-slate-500">Ubicacion lista: {Number(position.lat).toFixed(5)}, {Number(position.lng).toFixed(5)}</p>}
+        </form>
+        {nearbyCandidates.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {nearbyCandidates.map(candidate => (
+              <CandidateCard
+                key={candidate.id}
+                candidate={candidate}
+                duplicate={duplicateForCandidate(candidate, stores)}
+                saving={saving}
+                onSelect={selectCandidate}
+                onSave={saveCandidate}
+              />
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="rounded-[2rem] border border-blue-100 bg-white p-4 shadow-sm">
