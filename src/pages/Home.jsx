@@ -3,217 +3,311 @@ import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 
+const NEARBY_RADIUS_M = 8000
+const MAX_SECTOR_DETECTION_M = 50000
+
 function money(value) {
-  return Number(value || 0).toLocaleString('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 })
+  const number = Number(value || 0)
+  return number.toLocaleString('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 })
+}
+
+function isValidCoordinate(lat, lng) {
+  if (lat === null || lat === undefined || lng === null || lng === undefined) return false
+  if (String(lat).trim() === '' || String(lng).trim() === '') return false
+  const latitude = Number(lat)
+  const longitude = Number(lng)
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false
+  if (latitude === 0 && longitude === 0) return false
+  return Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
 }
 
 function distanceMeters(a, b) {
-  if (!a?.lat || !a?.lng || !b?.lat || !b?.lng) return null
+  if (!isValidCoordinate(a?.lat, a?.lng) || !isValidCoordinate(b?.lat, b?.lng)) return null
   const R = 6371000
-  const toRad = deg => (deg * Math.PI) / 180
-  const dLat = toRad(b.lat - a.lat)
-  const dLng = toRad(b.lng - a.lng)
+  const toRad = value => Number(value) * Math.PI / 180
+  const dLat = toRad(Number(b.lat) - Number(a.lat))
+  const dLng = toRad(Number(b.lng) - Number(a.lng))
   const lat1 = toRad(a.lat)
   const lat2 = toRad(b.lat)
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
-  return 2 * R * Math.asin(Math.sqrt(h))
+  return Math.round(2 * R * Math.asin(Math.sqrt(h)))
 }
 
 function formatDistance(meters) {
   if (meters == null) return 'Sin distancia'
-  if (meters < 1000) return `${Math.round(meters)} m`
-  return `${(meters / 1000).toFixed(1)} km`
+  if (meters < 1000) return `${meters} m`
+  return `${(meters / 1000).toFixed(1).replace('.0', '')} km`
 }
 
-function Card({ children, className = '' }) {
-  return <section className={`rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm ${className}`}>{children}</section>
+function hasCoords(row) {
+  return isValidCoordinate(row?.latitude, row?.longitude)
+}
+
+function readFlexiblePoints(row) {
+  const value = row?.balance ?? row?.points ?? row?.total_points ?? row?.current_points ?? 0
+  const number = Number(value)
+  return Number.isFinite(number) ? number : 0
+}
+
+async function loadUserPoints(userId) {
+  if (!userId) return 0
+  const { data, error } = await supabase
+    .from('user_points')
+    .select('*')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) {
+    console.warn('PriceNow points unavailable:', error.message)
+    return 0
+  }
+
+  return readFlexiblePoints(data)
 }
 
 export default function Home() {
   const { user, profile, isValidator } = useAuth()
-  const [entries, setEntries] = useState([])
+  const [position, setPosition] = useState(null)
+  const [locationStatus, setLocationStatus] = useState('idle')
   const [stores, setStores] = useState([])
-  const [wallet, setWallet] = useState(null)
-  const [alerts, setAlerts] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [location, setLocation] = useState(null)
-  const [locationMessage, setLocationMessage] = useState('')
+  const [sectors, setSectors] = useState([])
+  const [prices, setPrices] = useState([])
+  const [stats, setStats] = useState({ today: 0, points: 0 })
+  const [loadError, setLoadError] = useState(null)
 
   async function load() {
-    setLoading(true)
-    const [entriesRes, storesRes, walletRes, alertsRes] = await Promise.all([
+    setLoadError(null)
+    const start = new Date()
+    start.setHours(0, 0, 0, 0)
+
+    const [storesRes, sectorsRes, pricesRes, todayRes, points] = await Promise.all([
+      supabase
+        .from('stores')
+        .select('id, name, chain, type, sector, address, latitude, longitude, is_verified')
+        .eq('is_active', true)
+        .not('latitude', 'is', null)
+        .not('longitude', 'is', null)
+        .limit(600),
+      supabase
+        .from('local_sectors')
+        .select('id, commune, name, latitude, longitude, radius_m')
+        .eq('is_active', true)
+        .limit(300),
       supabase
         .from('price_entries')
-        .select('id, product_name, store_name, sector, unit_price, price, created_at, purchase_date, store_id, product_id, stores(id, name, sector, latitude, longitude), products(id, name, default_unit, category)')
+        .select('id, product_name, store_name, sector, unit_price, unit, purchase_date')
         .eq('validation_status', 'approved')
         .order('created_at', { ascending: false })
-        .limit(250),
-      supabase.from('stores').select('id, name, sector, address, latitude, longitude, chain').eq('is_active', true).limit(250),
-      supabase.from('user_points').select('*').eq('user_id', user?.id).maybeSingle(),
-      supabase.from('price_alerts').select('*, products(name, default_unit)').eq('user_id', user?.id).eq('is_active', true).limit(20),
+        .limit(20),
+      supabase
+        .from('price_entries')
+        .select('id', { count: 'exact', head: true })
+        .eq('validation_status', 'approved')
+        .gte('created_at', start.toISOString()),
+      loadUserPoints(user?.id),
     ])
-    setEntries(entriesRes.data || [])
-    setStores(storesRes.data || [])
-    setWallet(walletRes.data || null)
-    setAlerts(alertsRes.data || [])
-    setLoading(false)
+
+    const error = storesRes.error || pricesRes.error || todayRes.error
+    if (error) setLoadError(error.message)
+    if (sectorsRes.error) console.warn('PriceNow sectors unavailable:', sectorsRes.error.message)
+
+    setStores((storesRes.data || []).filter(hasCoords))
+    setSectors((sectorsRes.data || []).filter(hasCoords))
+    setPrices(pricesRes.data || [])
+    setStats({
+      today: todayRes.count || 0,
+      points,
+    })
   }
 
   useEffect(() => { load() }, [user?.id])
 
-  function requestLocation() {
+  useEffect(() => {
+    if (!navigator.permissions || !navigator.geolocation) return
+    navigator.permissions.query({ name: 'geolocation' }).then(permission => {
+      if (permission.state === 'granted' && locationStatus === 'idle') askLocation()
+    }).catch(() => {})
+  }, [locationStatus])
+
+  function askLocation() {
     if (!navigator.geolocation) {
-      setLocationMessage('Tu navegador no permite ubicación.')
+      setLocationStatus('error')
       return
     }
-    setLocationMessage('Solicitando ubicación...')
+    setLocationStatus('loading')
     navigator.geolocation.getCurrentPosition(
-      position => {
-        setLocation({ lat: position.coords.latitude, lng: position.coords.longitude })
-        setLocationMessage('Ubicación activada para mostrar datos cercanos.')
+      current => {
+        setPosition({
+          lat: Number(current.coords.latitude),
+          lng: Number(current.coords.longitude),
+          accuracy: Math.round(current.coords.accuracy || 0),
+        })
+        setLocationStatus('ok')
       },
-      () => setLocationMessage('No se pudo obtener ubicación. Puedes usar la app igual.'),
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+      () => setLocationStatus('error'),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     )
   }
 
   const nearbyStores = useMemo(() => {
-    const withDistance = stores
-      .map(store => ({
-        ...store,
-        distance: distanceMeters(location, { lat: Number(store.latitude), lng: Number(store.longitude) }),
-      }))
-      .filter(store => store.distance != null)
-      .sort((a, b) => a.distance - b.distance)
-      .slice(0, 5)
-    return withDistance
-  }, [stores, location])
+    if (!position) return []
+    return stores
+      .map(store => ({ ...store, distance_m: distanceMeters(position, { lat: store.latitude, lng: store.longitude }) }))
+      .filter(store => store.distance_m != null && store.distance_m <= NEARBY_RADIUS_M)
+      .sort((a, b) => a.distance_m - b.distance_m)
+      .slice(0, 6)
+  }, [stores, position])
 
-  const bestPrices = useMemo(() => {
-    const latestByProduct = new Map()
-    for (const entry of entries) {
-      const key = entry.product_id || entry.product_name
-      const current = latestByProduct.get(key)
-      const unitPrice = Number(entry.unit_price || entry.price || 0)
-      if (!current || unitPrice < Number(current.unit_price || current.price || 0)) latestByProduct.set(key, entry)
+  const nearestSector = useMemo(() => {
+    if (!position) return null
+    return sectors
+      .map(sector => ({ ...sector, distance_m: distanceMeters(position, { lat: sector.latitude, lng: sector.longitude }) }))
+      .filter(sector => sector.distance_m != null)
+      .sort((a, b) => a.distance_m - b.distance_m)[0] || null
+  }, [sectors, position])
+
+  const sectorDetection = useMemo(() => {
+    if (!position || !nearestSector) return null
+    if (nearestSector.distance_m > MAX_SECTOR_DETECTION_M) {
+      return {
+        type: 'warning',
+        text: 'No pudimos detectar tu sector con precision. Puedes elegirlo manualmente o pedir a un admin que configure la zona.',
+      }
     }
-    return [...latestByProduct.values()].slice(0, 5)
-  }, [entries])
-
-  const opportunities = useMemo(() => {
-    return alerts.map(alert => {
-      const match = entries.find(entry => {
-        if (alert.product_id && entry.product_id !== alert.product_id) return false
-        if (alert.sector && entry.sector !== alert.sector) return false
-        return Number(entry.unit_price || 0) <= Number(alert.target_unit_price)
-      })
-      return { alert, match }
-    }).filter(item => item.match).slice(0, 3)
-  }, [alerts, entries])
-
-  const approvedToday = entries.filter(entry => new Date(entry.created_at).toDateString() === new Date().toDateString()).length
-  const firstName = profile?.full_name?.split(' ')[0] || profile?.username || user?.email?.split('@')[0] || 'usuario'
+    return {
+      type: 'ok',
+      name: nearestSector.name,
+      distance: formatDistance(nearestSector.distance_m),
+    }
+  }, [nearestSector, position])
 
   return (
-    <div className="space-y-5 pb-28">
-      <section className="overflow-hidden rounded-[2rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 p-5 text-white shadow-xl">
-        <div className="flex items-start justify-between gap-4">
+    <div className="space-y-5 pb-32">
+      <section className="relative overflow-hidden rounded-b-[2.5rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 px-5 pb-8 pt-8 text-white shadow-xl">
+        <div className="absolute -right-12 -top-12 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
+        <div className="relative flex items-start justify-between gap-4">
           <div>
-            <p className="text-sm text-blue-100">Hola, {firstName}</p>
-            <h1 className="mt-1 text-2xl font-black leading-tight">Precios reales cerca de ti</h1>
-            <p className="mt-2 text-sm text-blue-50">Compara, reporta y gana beneficios colaborando con la comunidad.</p>
+            <p className="text-lg text-white/80">Hola, {profile?.username || 'usuario'}</p>
+            <h1 className="mt-2 max-w-[270px] text-4xl font-black leading-tight">Precios reales cerca de ti</h1>
+            <p className="mt-4 max-w-sm text-base text-white/80">Compara, reporta y ayuda a construir el mapa local de precios de tu zona.</p>
           </div>
-          <div className="rounded-3xl bg-white/10 p-3 text-center backdrop-blur">
-            <p className="text-xl font-black">{wallet?.balance ?? 0}</p>
-            <p className="text-[11px] text-blue-100">puntos</p>
+          <div className="rounded-[1.5rem] bg-white/10 px-5 py-4 text-center backdrop-blur">
+            <p className="text-3xl font-black">{stats.points || 0}</p>
+            <p className="text-sm text-white/80">puntos</p>
           </div>
         </div>
-        <div className="mt-5 grid grid-cols-3 gap-2 text-center">
-          <Link to="/add" className="rounded-2xl bg-white px-3 py-3 text-xs font-black text-blue-700 shadow-sm">Reportar</Link>
-          <Link to="/ranking" className="rounded-2xl bg-white/10 px-3 py-3 text-xs font-black text-white ring-1 ring-white/20">Precios</Link>
-          <Link to="/profile?tab=beneficios" className="rounded-2xl bg-white/10 px-3 py-3 text-xs font-black text-white ring-1 ring-white/20">Beneficios</Link>
+        <div className="relative mt-6 grid grid-cols-3 gap-2">
+          <Link to="/add" className="rounded-2xl bg-white px-4 py-3 text-center text-sm font-black text-blue-700 shadow-sm">Reportar</Link>
+          <Link to="/ranking" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Precios</Link>
+          <Link to="/profile?tab=beneficios" className="rounded-2xl bg-white/10 px-4 py-3 text-center text-sm font-black text-white ring-1 ring-white/20">Beneficios</Link>
         </div>
       </section>
 
-      <Card>
-        <div className="flex items-start justify-between gap-3">
+      {loadError && (
+        <div className="mx-4 rounded-2xl border border-amber-100 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
+          No se pudo cargar toda la inteligencia local: {loadError}
+        </div>
+      )}
+
+      <section className="mx-4 rounded-[2rem] border border-slate-100 bg-white p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="font-black text-slate-900">Tu zona</h2>
-            <p className="mt-1 text-sm text-slate-500">Activa ubicación para priorizar negocios y precios cercanos.</p>
-            {locationMessage && <p className="mt-2 text-xs font-semibold text-blue-600">{locationMessage}</p>}
+            <h2 className="text-xl font-black text-slate-900">Tu zona</h2>
+            <p className="mt-1 text-sm text-slate-500">Activa ubicación para detectar latitud y longitud, ordenar negocios reales cercanos y calcular distancia exacta.</p>
           </div>
-          <button onClick={requestLocation} className="rounded-2xl bg-slate-950 px-4 py-2 text-xs font-bold text-white">Usar ubicación</button>
+          <button onClick={askLocation} disabled={locationStatus === 'loading'} className="shrink-0 rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white active:scale-95 disabled:opacity-50">
+            {locationStatus === 'loading' ? 'Buscando...' : 'Usar ubicación'}
+          </button>
         </div>
-        <div className="mt-4 grid gap-2">
-          {nearbyStores.length === 0 && <p className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">Aún no hay tiendas cercanas con coordenadas. Los reportes aprobados seguirán mejorando esta zona.</p>}
-          {nearbyStores.map(store => (
-            <div key={store.id} className="flex items-center justify-between rounded-2xl bg-slate-50 p-3">
-              <div>
-                <p className="text-sm font-black text-slate-800">{store.name}</p>
-                <p className="text-xs text-slate-500">{store.sector || 'Sin sector'}</p>
-              </div>
-              <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-600">{formatDistance(store.distance)}</span>
-            </div>
-          ))}
-        </div>
-      </Card>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Card>
-          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Hoy</p>
-          <p className="mt-1 text-2xl font-black text-slate-900">{approvedToday}</p>
-          <p className="text-xs text-slate-500">precios aprobados</p>
-        </Card>
-        <Card>
-          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Meta sugerida</p>
-          <p className="mt-1 text-2xl font-black text-slate-900">+15</p>
-          <p className="text-xs text-slate-500">puntos por reportar hoy</p>
-        </Card>
-      </div>
+        {locationStatus === 'ok' && (
+          <p className="mt-3 text-sm font-bold text-blue-600">
+            Ubicación activada{position?.accuracy ? `, precisión aprox. ${position.accuracy} m` : ''}.
+          </p>
+        )}
+        {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicación. Puedes seguir usando PriceNow y elegir sector desde Perfil.</p>}
+        {sectorDetection?.type === 'ok' && <div className="mt-3 rounded-2xl bg-blue-50 p-3 text-sm text-blue-700">Parece que estas cerca de <b>{sectorDetection.name}</b> ({sectorDetection.distance} del centro configurado).</div>}
+        {sectorDetection?.type === 'warning' && <div className="mt-3 rounded-2xl bg-amber-50 p-3 text-sm font-semibold text-amber-800">{sectorDetection.text}</div>}
 
-      <Card>
-        <div className="flex items-center justify-between">
-          <h2 className="font-black text-slate-900">Mejores precios recientes</h2>
-          <Link to="/ranking" className="text-xs font-bold text-blue-600">Ver todo</Link>
-        </div>
-        <div className="mt-4 space-y-2">
-          {bestPrices.length === 0 && <p className="text-sm text-slate-500">Aún no hay precios aprobados.</p>}
-          {bestPrices.map(entry => (
-            <div key={entry.id} className="flex items-center justify-between rounded-2xl bg-slate-50 p-3">
-              <div>
-                <p className="text-sm font-black text-slate-800">{entry.products?.name || entry.product_name}</p>
-                <p className="text-xs text-slate-500">{entry.store_name} · {entry.sector}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-sm font-black text-emerald-600">{money(entry.unit_price || entry.price)}</p>
-                <p className="text-[11px] text-slate-400">por {entry.products?.default_unit || 'unidad'}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      {opportunities.length > 0 && (
-        <Card className="border-emerald-100 bg-emerald-50/50">
-          <h2 className="font-black text-emerald-900">Alertas que se cumplieron</h2>
-          <div className="mt-3 space-y-2">
-            {opportunities.map(({ alert, match }) => (
-              <div key={alert.id} className="rounded-2xl bg-white p-3 text-sm text-emerald-800">
-                {match.product_name} está a {money(match.unit_price)} en {match.store_name}.
+        {!position ? (
+          <div className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">
+            PriceNow solo mostrará negocios cercanos después de activar tu ubicación. Los negocios sin coordenadas reales quedan fuera de esta lista para evitar distancias inventadas.
+          </div>
+        ) : nearbyStores.length === 0 ? (
+          <div className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">
+            Aún no hay negocios con coordenadas reales cerca de esta ubicación. Un admin puede agregar negocios, completar latitud/longitud o verificar coordenadas desde el mapa local.
+            {isValidator && <Link to="/local-map" className="mt-3 block font-black text-blue-600">Agregar negocios con coordenadas</Link>}
+          </div>
+        ) : (
+          <div className="mt-4 space-y-2">
+            {nearbyStores.map(store => (
+              <div key={store.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3">
+                <div className="min-w-0">
+                  <p className="truncate font-bold text-slate-900">{store.name}</p>
+                  <p className="truncate text-xs text-slate-500">{store.sector || 'Sin sector'} · {store.type || store.chain || 'negocio'}{store.is_verified ? ' · verificado' : ''}</p>
+                </div>
+                <span className="shrink-0 text-sm font-black text-blue-600">{formatDistance(store.distance_m)}</span>
               </div>
             ))}
           </div>
-        </Card>
-      )}
+        )}
+      </section>
+
+      <div className="mx-4 grid grid-cols-2 gap-3">
+        <div className="rounded-[2rem] border border-slate-100 bg-white p-5 shadow-sm">
+          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Hoy</p>
+          <p className="mt-2 text-3xl font-black text-slate-900">{stats.today}</p>
+          <p className="text-sm text-slate-500">precios aprobados</p>
+        </div>
+        <div className="rounded-[2rem] border border-slate-100 bg-white p-5 shadow-sm">
+          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Meta sugerida</p>
+          <p className="mt-2 text-3xl font-black text-slate-900">+15</p>
+          <p className="text-sm text-slate-500">puntos por reportar hoy</p>
+        </div>
+      </div>
+
+      <section className="mx-4 rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="font-black text-slate-900">Mejores precios recientes</h2>
+          <Link to="/ranking" className="text-xs font-black text-blue-600">Ver todo</Link>
+        </div>
+        <div className="mt-3 space-y-2">
+          {prices.slice(0, 6).map(price => (
+            <div key={price.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3">
+              <div className="min-w-0">
+                <p className="truncate font-bold text-slate-900">{price.product_name}</p>
+                <p className="truncate text-xs text-slate-500">{price.store_name} · {price.sector}</p>
+              </div>
+              <div className="shrink-0 text-right">
+                <p className="font-black text-emerald-600">{money(price.unit_price)}</p>
+                <p className="text-xs text-slate-400">por {price.unit}</p>
+              </div>
+            </div>
+          ))}
+          {prices.length === 0 && <p className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">Aún no hay precios aprobados.</p>}
+        </div>
+      </section>
+
+      <section className="mx-4 rounded-[2rem] border border-blue-100 bg-white p-4 shadow-sm">
+        <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">KairosNow</p>
+        <p className="mt-2 text-sm leading-relaxed text-slate-600">PriceNow forma parte de KairosNow, un ecosistema de herramientas para precios, negocios y finanzas.</p>
+        <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black">
+          <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">PriceNow<br /><span className="font-semibold">activo</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">LedgerNow<br /><span className="font-semibold">próximamente</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">WalleNow<br /><span className="font-semibold">próximamente</span></div>
+        </div>
+      </section>
 
       {isValidator && (
-        <Card>
+        <section className="mx-4 rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
           <h2 className="font-black text-slate-900">Herramientas admin</h2>
           <div className="mt-3 grid grid-cols-2 gap-2">
-            <Link to="/quality" className="rounded-2xl bg-slate-950 px-3 py-3 text-center text-xs font-bold text-white">Calidad de datos</Link>
-            <Link to="/partners" className="rounded-2xl bg-blue-50 px-3 py-3 text-center text-xs font-bold text-blue-700">Negocios asociados</Link>
+            <Link to="/quality" className="rounded-2xl bg-slate-950 px-4 py-3 text-center text-sm font-black text-white">Calidad de datos</Link>
+            <Link to="/local-map" className="rounded-2xl bg-blue-50 px-4 py-3 text-center text-sm font-black text-blue-700">Mapa local</Link>
+            <Link to="/partners" className="rounded-2xl bg-blue-50 px-4 py-3 text-center text-sm font-black text-blue-700">Negocios asociados</Link>
+            <Link to="/validate" className="rounded-2xl bg-amber-50 px-4 py-3 text-center text-sm font-black text-amber-700">Validar</Link>
           </div>
-        </Card>
+        </section>
       )}
     </div>
   )

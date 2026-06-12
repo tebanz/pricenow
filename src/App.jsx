@@ -11,6 +11,7 @@ import Profile from './pages/Profile'
 import DataQuality from './pages/DataQuality'
 import BusinessPartners from './pages/BusinessPartners'
 import FavoritesAlerts from './pages/FavoritesAlerts'
+import LocalMapAdmin from './pages/LocalMapAdmin'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -29,18 +30,12 @@ function ValidatorRoute({ children }) {
 
 export default function App() {
   const { user, loading } = useAuth()
-
   if (loading) return <Spinner fullscreen />
 
   return (
     <Routes>
       <Route path="/auth" element={user ? <Navigate to="/" replace /> : <AuthPage />} />
-
-      <Route element={
-        <ProtectedRoute>
-          <Layout />
-        </ProtectedRoute>
-      }>
+      <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
         <Route index element={<Home />} />
         <Route path="add" element={<AddPrice />} />
         <Route path="ranking" element={<Ranking />} />
@@ -48,23 +43,11 @@ export default function App() {
         <Route path="benefits" element={<Navigate to="/profile?tab=beneficios" replace />} />
         <Route path="favorites" element={<FavoritesAlerts />} />
         <Route path="profile" element={<Profile />} />
-        <Route path="quality" element={
-          <ValidatorRoute>
-            <DataQuality />
-          </ValidatorRoute>
-        } />
-        <Route path="partners" element={
-          <ValidatorRoute>
-            <BusinessPartners />
-          </ValidatorRoute>
-        } />
-        <Route path="validate" element={
-          <ValidatorRoute>
-            <Validate />
-          </ValidatorRoute>
-        } />
+        <Route path="validate" element={<ValidatorRoute><Validate /></ValidatorRoute>} />
+        <Route path="quality" element={<ValidatorRoute><DataQuality /></ValidatorRoute>} />
+        <Route path="partners" element={<ValidatorRoute><BusinessPartners /></ValidatorRoute>} />
+        <Route path="local-map" element={<ValidatorRoute><LocalMapAdmin /></ValidatorRoute>} />
       </Route>
-
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

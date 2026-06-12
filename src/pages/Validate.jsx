@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 
+const UNITS = ['unidad', 'kg', 'g', 'litro', 'ml', 'metro', 'par', 'caja']
+
 function normalize(text = '') {
   return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 }
@@ -19,12 +21,35 @@ function money(value) {
   return Number(value || 0).toLocaleString('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 })
 }
 
+function hasCoords(row) {
+  return row?.latitude != null && row?.longitude != null && Number.isFinite(Number(row.latitude)) && Number.isFinite(Number(row.longitude))
+}
+
+function reportHasCoords(entry) {
+  return entry?.purchase_latitude != null && entry?.purchase_longitude != null && Number.isFinite(Number(entry.purchase_latitude)) && Number.isFinite(Number(entry.purchase_longitude))
+}
+
+function formatCoords(lat, lng) {
+  if (lat == null || lng == null) return 'Sin coordenadas'
+  return `${Number(lat).toFixed(7)}, ${Number(lng).toFixed(7)}`
+}
+
+function SuggestionLine({ label, value, action }) {
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-2xl bg-blue-50 p-3 text-sm text-blue-900">
+      <p><b>{label}:</b> {value}</p>
+      {action}
+    </div>
+  )
+}
+
 export default function Validate() {
   const { user, isValidator } = useAuth()
   const [tab, setTab] = useState('pending')
   const [entries, setEntries] = useState([])
   const [products, setProducts] = useState([])
   const [stores, setStores] = useState([])
+  const [corrections, setCorrections] = useState({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
@@ -34,11 +59,10 @@ export default function Validate() {
     setMessage(null)
 
     const [entriesRes, productsRes, storesRes] = await Promise.all([
-      // No usamos embedding profiles(username) porque price_entries tiene más de una relación con profiles
-      // (user_id y validated_by). Eso genera error PGRST201 en Supabase.
-      supabase.from('price_entries').select('*').order('created_at', { ascending: false }).limit(150),
-      supabase.from('products').select('*').eq('is_active', true).limit(700),
-      supabase.from('stores').select('*').eq('is_active', true).limit(700),
+      // No usamos embeds con profiles: price_entries puede apuntar a profiles por user_id y validated_by.
+      supabase.from('price_entries').select('*').order('created_at', { ascending: false }).limit(180),
+      supabase.from('products').select('*').eq('is_active', true).limit(900),
+      supabase.from('stores').select('*').eq('is_active', true).limit(900),
     ])
 
     if (entriesRes.error || productsRes.error || storesRes.error) {
@@ -55,14 +79,12 @@ export default function Validate() {
     let profileMap = {}
 
     if (userIds.length) {
-      const { data: profileRows, error: profilesError } = await supabase
+      const { data: profileRows } = await supabase
         .from('profiles')
         .select('id, username')
         .in('id', userIds)
 
-      if (!profilesError) {
-        profileMap = Object.fromEntries((profileRows || []).map(row => [row.id, row.username]))
-      }
+      profileMap = Object.fromEntries((profileRows || []).map(row => [row.id, row.username]))
     }
 
     setEntries(rawEntries.map(entry => ({
@@ -79,29 +101,95 @@ export default function Validate() {
   const filtered = useMemo(() => entries.filter(e => tab === 'all' || e.validation_status === tab), [entries, tab])
 
   function suggestions(entry) {
-    const product = products.map(p => ({ ...p, score: sim(entry.product_name, p.name) })).sort((a, b) => b.score - a.score)[0]
-    const store = stores.map(s => ({ ...s, score: sim(`${entry.store_name} ${entry.sector}`, `${s.name} ${s.sector}`) })).sort((a, b) => b.score - a.score)[0]
+    const product = products
+      .map(p => ({ ...p, score: sim(entry.product_name, `${p.name} ${p.category || ''} ${p.subcategory || ''}`) }))
+      .sort((a, b) => b.score - a.score)[0]
+    const store = stores
+      .map(s => ({ ...s, score: sim(`${entry.store_name} ${entry.sector}`, `${s.name} ${s.sector || ''} ${s.address || ''}`) }))
+      .sort((a, b) => b.score - a.score)[0]
     return { product, store }
   }
 
-  async function approve(entry, apply = false) {
+  function updateCorrection(entryId, patch) {
+    setCorrections(prev => ({ ...prev, [entryId]: { ...(prev[entryId] || {}), ...patch } }))
+  }
+
+  function draftFor(entry, product, store) {
+    const current = corrections[entry.id] || {}
+    const productSuggestion = product?.score >= 0.34 ? product : null
+    const storeSuggestion = store?.score >= 0.34 ? store : null
+    return {
+      product_name: current.product_name ?? productSuggestion?.name ?? entry.product_name,
+      unit: current.unit ?? productSuggestion?.default_unit ?? entry.unit,
+      store_name: current.store_name ?? storeSuggestion?.name ?? entry.store_name,
+      sector: current.sector ?? storeSuggestion?.sector ?? entry.sector,
+    }
+  }
+
+  function targetStoreForCoords(entry, suggestedStore) {
+    if (entry.store_id) {
+      const byId = stores.find(store => store.id === entry.store_id)
+      if (byId) return byId
+    }
+    if (suggestedStore?.score >= 0.34) return suggestedStore
+    return null
+  }
+
+  async function approve(entry, mode = 'raw') {
     const { product, store } = suggestions(entry)
-    const patch = { validation_status: 'approved', validated_by: user?.id || null, validated_at: new Date().toISOString(), updated_at: new Date().toISOString() }
-    if (apply && product?.score >= 0.34) {
-      patch.product_id = product.id
-      patch.product_name = product.name
-      patch.unit = product.default_unit || entry.unit
+    const draft = draftFor(entry, product, store)
+    const patch = {
+      validation_status: 'approved',
+      validated_by: user?.id || null,
+      validated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     }
-    if (apply && store?.score >= 0.34) {
-      patch.store_id = store.id
-      patch.store_name = store.name
-      patch.sector = store.sector || entry.sector
+
+    if (mode === 'corrected') {
+      patch.product_name = draft.product_name.trim()
+      patch.unit = draft.unit || entry.unit
+      patch.store_name = draft.store_name.trim()
+      patch.sector = draft.sector.trim() || entry.sector
+
+      if (product?.score >= 0.34 && normalize(draft.product_name) === normalize(product.name)) {
+        patch.product_id = product.id
+      }
+      if (store?.score >= 0.34 && normalize(draft.store_name) === normalize(store.name)) {
+        patch.store_id = store.id
+      }
     }
+
     setSaving(true)
     const { error } = await supabase.from('price_entries').update(patch).eq('id', entry.id)
     setSaving(false)
     if (error) return setMessage({ type: 'error', text: error.message })
-    setMessage({ type: 'ok', text: apply ? 'Reporte aprobado con correcciones.' : 'Reporte aprobado.' })
+    setCorrections(prev => {
+      const next = { ...prev }
+      delete next[entry.id]
+      return next
+    })
+    setMessage({ type: 'ok', text: mode === 'corrected' ? 'Reporte aprobado con correcciones.' : 'Reporte aprobado.' })
+    await load()
+  }
+
+  async function saveReportCoordsToStore(entry, store) {
+    if (!store?.id || !reportHasCoords(entry)) return
+    const ok = window.confirm(`Guardar coordenadas del reporte en ${store.name}?`)
+    if (!ok) return
+    setSaving(true)
+    const { error } = await supabase
+      .from('stores')
+      .update({
+        latitude: Number(entry.purchase_latitude),
+        longitude: Number(entry.purchase_longitude),
+        location_source: 'validated_price_entry',
+        is_verified: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', store.id)
+    setSaving(false)
+    if (error) return setMessage({ type: 'error', text: error.message })
+    setMessage({ type: 'ok', text: 'Coordenadas guardadas en el negocio.' })
     await load()
   }
 
@@ -109,7 +197,16 @@ export default function Validate() {
     const reason = window.prompt('Motivo del rechazo:', 'Dato incorrecto o incompleto')
     if (reason === null) return
     setSaving(true)
-    const { error } = await supabase.from('price_entries').update({ validation_status: 'rejected', rejection_reason: reason, validated_by: user?.id || null, validated_at: new Date().toISOString() }).eq('id', entry.id)
+    const { error } = await supabase
+      .from('price_entries')
+      .update({
+        validation_status: 'rejected',
+        rejection_reason: reason,
+        validated_by: user?.id || null,
+        validated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', entry.id)
     setSaving(false)
     if (error) return setMessage({ type: 'error', text: error.message })
     setMessage({ type: 'ok', text: 'Reporte rechazado.' })
@@ -123,7 +220,7 @@ export default function Validate() {
       <section className="rounded-[2rem] bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-black text-slate-900">Validación inteligente</h1>
+            <h1 className="text-2xl font-black text-slate-900">Validacion inteligente</h1>
             <p className="mt-1 text-sm text-slate-500">Aprueba, corrige productos mal escritos y asocia negocios reales antes de guardar datos definitivos.</p>
           </div>
           <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">{filtered.length} registros</span>
@@ -139,11 +236,17 @@ export default function Validate() {
       <div className="space-y-3">
         {filtered.map(entry => {
           const { product, store } = suggestions(entry)
+          const draft = draftFor(entry, product, store)
+          const productSuggestion = product?.score >= 0.34 ? `${product.name} · ${product.default_unit || 'unidad'} (${Math.round(product.score * 100)}%)` : 'Sin sugerencia clara'
+          const storeSuggestion = store?.score >= 0.34 ? `${store.name} · ${store.sector || 'Sin sector'} (${Math.round(store.score * 100)}%)` : 'Sin sugerencia clara'
+          const coordsStore = targetStoreForCoords(entry, store)
+          const canSaveCoords = coordsStore && !hasCoords(coordsStore) && reportHasCoords(entry)
+
           return (
             <div key={entry.id} className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
               <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="font-black text-slate-900">{entry.product_name} {entry.brand && <span className="font-normal text-slate-400">· {entry.brand}</span>}</h2>
+                <div className="min-w-0">
+                  <h2 className="truncate font-black text-slate-900">{entry.product_name} {entry.brand && <span className="font-normal text-slate-400">· {entry.brand}</span>}</h2>
                   <p className="text-xs text-slate-500">por @{entry.profile_username || 'usuario'} · {entry.purchase_date}</p>
                 </div>
                 <span className={`rounded-full px-2 py-1 text-[11px] font-bold ${entry.validation_status === 'approved' ? 'bg-emerald-50 text-emerald-700' : entry.validation_status === 'rejected' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>{entry.validation_status}</span>
@@ -152,25 +255,62 @@ export default function Validate() {
               <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
                 <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Precio</p><b>{money(entry.price)}</b></div>
                 <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Unitario</p><b>{money(entry.unit_price)} / {entry.unit}</b></div>
+                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Producto escrito</p><b>{entry.product_name}</b></div>
+                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Negocio escrito</p><b>{entry.store_name}</b></div>
                 <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Cantidad</p><b>{entry.quantity} {entry.unit}</b></div>
-                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Tienda</p><b>{entry.store_name}</b></div>
+                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Ubicacion reporte</p><b>{reportHasCoords(entry) ? formatCoords(entry.purchase_latitude, entry.purchase_longitude) : 'Sin coordenadas'}</b></div>
               </div>
 
-              <div className="mt-3 rounded-2xl bg-blue-50 p-3 text-sm text-blue-800">
-                <p><b>Producto sugerido:</b> {product?.score >= 0.34 ? `${product.name} · ${product.default_unit} (${Math.round(product.score * 100)}%)` : 'Sin sugerencia clara'}</p>
-                <p className="mt-1"><b>Negocio sugerido:</b> {store?.score >= 0.34 ? `${store.name} · ${store.sector} (${Math.round(store.score * 100)}%)` : 'Sin sugerencia clara'}</p>
+              <div className="mt-3 grid gap-2">
+                <SuggestionLine
+                  label="Producto sugerido"
+                  value={productSuggestion}
+                  action={product?.score >= 0.34 && <button type="button" onClick={() => updateCorrection(entry.id, { product_name: product.name, unit: product.default_unit || entry.unit })} className="shrink-0 rounded-xl bg-white px-3 py-2 text-xs font-bold text-blue-700">Usar</button>}
+                />
+                <SuggestionLine
+                  label="Negocio sugerido"
+                  value={storeSuggestion}
+                  action={store?.score >= 0.34 && <button type="button" onClick={() => updateCorrection(entry.id, { store_name: store.name, sector: store.sector || entry.sector })} className="shrink-0 rounded-xl bg-white px-3 py-2 text-xs font-bold text-blue-700">Usar</button>}
+                />
               </div>
+
+              {canSaveCoords && (
+                <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-800">
+                  <p><b>{coordsStore.name}</b> no tiene coordenadas. Este reporte si las trae: {formatCoords(entry.purchase_latitude, entry.purchase_longitude)}.</p>
+                  <button disabled={saving} type="button" onClick={() => saveReportCoordsToStore(entry, coordsStore)} className="mt-2 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white disabled:opacity-50">Guardar coordenadas en el negocio</button>
+                </div>
+              )}
 
               {entry.validation_status === 'pending' && (
-                <div className="mt-3 grid grid-cols-3 gap-2">
-                  <button disabled={saving} onClick={() => approve(entry, true)} className="rounded-2xl bg-blue-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">Aprobar corrigiendo</button>
-                  <button disabled={saving} onClick={() => approve(entry, false)} className="rounded-2xl bg-emerald-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">Aprobar</button>
-                  <button disabled={saving} onClick={() => reject(entry)} className="rounded-2xl bg-red-50 px-3 py-3 text-xs font-black text-red-700 disabled:opacity-50">Rechazar</button>
-                </div>
+                <>
+                  <div className="mt-3 grid gap-2 rounded-2xl border border-slate-100 p-3 text-sm sm:grid-cols-2">
+                    <label className="grid gap-1 text-xs font-bold text-slate-500">Producto corregido
+                      <input value={draft.product_name} onChange={e => updateCorrection(entry.id, { product_name: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" />
+                    </label>
+                    <label className="grid gap-1 text-xs font-bold text-slate-500">Unidad
+                      <select value={draft.unit} onChange={e => updateCorrection(entry.id, { unit: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900">
+                        {UNITS.map(unit => <option key={unit} value={unit}>{unit}</option>)}
+                      </select>
+                    </label>
+                    <label className="grid gap-1 text-xs font-bold text-slate-500">Negocio corregido
+                      <input value={draft.store_name} onChange={e => updateCorrection(entry.id, { store_name: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" />
+                    </label>
+                    <label className="grid gap-1 text-xs font-bold text-slate-500">Sector corregido
+                      <input value={draft.sector} onChange={e => updateCorrection(entry.id, { sector: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" />
+                    </label>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-3 gap-2">
+                    <button disabled={saving} onClick={() => approve(entry, 'corrected')} className="rounded-2xl bg-blue-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">Aprobar corrigiendo</button>
+                    <button disabled={saving} onClick={() => approve(entry, 'raw')} className="rounded-2xl bg-emerald-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">Aprobar igual</button>
+                    <button disabled={saving} onClick={() => reject(entry)} className="rounded-2xl bg-red-50 px-3 py-3 text-xs font-black text-red-700 disabled:opacity-50">Rechazar</button>
+                  </div>
+                </>
               )}
             </div>
           )
         })}
+        {!loading && filtered.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-slate-500 shadow-sm">No hay reportes en esta vista.</p>}
       </div>
     </div>
   )
