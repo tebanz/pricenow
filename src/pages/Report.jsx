@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { formatUnitPrice, priceChangeDisplay } from '../utils/priceCalc'
+import { calcUnitPrice, formatUnitPrice, priceChangeDisplay } from '../utils/priceCalc'
 import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowCommune, sameCommune, zoneSubtitle } from '../utils/location'
+import { effectivePrice, hasOffer, paymentConditionLabel } from '../utils/discounts'
 import Spinner from '../components/UI/Spinner'
 import { format, startOfWeek, endOfWeek, subWeeks, subDays } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -9,6 +10,12 @@ import { es } from 'date-fns/locale'
 function average(values) {
   if (!values.length) return null
   return values.reduce((acc, value) => acc + Number(value || 0), 0) / values.length
+}
+
+function effectiveUnitPrice(row) {
+  const calculated = calcUnitPrice(effectivePrice(row), row.quantity, row.unit)
+  if (calculated != null && Number.isFinite(Number(calculated)) && Number(calculated) > 0) return Number(calculated)
+  return Number(row.unit_price)
 }
 
 function rowDistanceFromZone(row, zone) {
@@ -96,7 +103,7 @@ function isCompatibleUnit(rowUnit, standardUnit) {
 
 function normalizedUnitPrice(row, standardUnit) {
   if (!isCompatibleUnit(row.unit, standardUnit)) return null
-  const value = Number(row.unit_price)
+  const value = effectiveUnitPrice(row)
   if (!Number.isFinite(value) || value <= 0) return null
   return value
 }
@@ -121,6 +128,8 @@ function groupByProduct(rows) {
         unitPrices: [],
         rawCount: 0,
         incompatibleCount: 0,
+        offerCount: 0,
+        paymentConditions: new Set(),
         stores: new Set(),
         latestDate: null,
       }
@@ -130,6 +139,9 @@ function groupByProduct(rows) {
     if (unitPrice != null) acc[key].unitPrices.push(unitPrice)
     else acc[key].incompatibleCount += 1
 
+    if (hasOffer(row)) acc[key].offerCount += 1
+    const paymentCondition = paymentConditionLabel(row)
+    if (paymentCondition) acc[key].paymentConditions.add(paymentCondition)
     if (row.store_name) acc[key].stores.add(row.store_name)
     if (!acc[key].latestDate || row.purchase_date > acc[key].latestDate) acc[key].latestDate = row.purchase_date
 
@@ -161,6 +173,8 @@ function buildReport(currentRows, previousRows) {
         sample_count: group.unitPrices.length,
         raw_count: group.rawCount,
         incompatible_count: group.incompatibleCount,
+        offer_count: group.offerCount,
+        payment_conditions: Array.from(group.paymentConditions),
         store_count: group.stores.size,
         latest_date: group.latestDate,
       }
@@ -373,6 +387,14 @@ export default function Report() {
                     <div className="flex-1 min-w-0">
                       <p className="font-black text-slate-900 truncate">{row.product_name}</p>
                       <p className="text-[11px] text-brand-600 font-medium mt-0.5">{row.category}</p>
+                      {row.offer_count > 0 && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black text-emerald-700">Oferta</span>
+                          {row.payment_conditions?.map(method => (
+                            <span key={method} className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-bold text-blue-700">Con {method}</span>
+                          ))}
+                        </div>
+                      )}
                       <p className="text-xs text-slate-400 mt-0.5">
                         {row.sample_count} {row.sample_count === 1 ? 'registro comparable' : 'registros comparables'} · {row.store_count} {row.store_count === 1 ? 'tienda' : 'tiendas'}
                         {row.incompatible_count > 0 && <> · {row.incompatible_count} sin unidad comparable</>}

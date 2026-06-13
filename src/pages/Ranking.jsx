@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import Report from './Report'
 import { supabase } from '../lib/supabase'
-import { formatCLP, formatUnitPrice } from '../utils/priceCalc'
+import { calcUnitPrice, formatCLP, formatUnitPrice } from '../utils/priceCalc'
 import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowCommune, sameCommune, zoneSubtitle } from '../utils/location'
+import { effectivePrice, hasOffer, paymentConditionLabel } from '../utils/discounts'
 import Spinner from '../components/UI/Spinner'
 
 function normalizeText(value = '') {
@@ -81,6 +82,12 @@ function average(values) {
   return values.reduce((acc, value) => acc + Number(value || 0), 0) / values.length
 }
 
+function effectiveUnitPrice(row) {
+  const calculated = calcUnitPrice(effectivePrice(row), row.quantity, row.unit)
+  if (calculated != null && Number.isFinite(Number(calculated)) && Number(calculated) > 0) return Number(calculated)
+  return Number(row.unit_price)
+}
+
 function rowDistanceFromZone(row, zone) {
   const lat = row.purchase_latitude ?? row.latitude
   const lng = row.purchase_longitude ?? row.longitude
@@ -123,7 +130,7 @@ function buildRanking(rows, searchTerm) {
     if (term && !searchText.includes(term)) return
 
     const groupKey = getProductKey(row)
-    const unitPrice = Number(row.unit_price)
+    const unitPrice = effectiveUnitPrice(row)
     const compatible = isCompatibleUnit(row.unit, standardUnit)
 
     if (!groups[groupKey]) {
@@ -374,13 +381,15 @@ export default function Ranking() {
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-slate-800 truncate">{store.store_name}</p>
                     <p className="text-xs text-slate-400 truncate">{store.sector}</p>
+                    {hasOffer(store.best_entry) && <span className="mt-1 inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black text-emerald-700">Oferta</span>}
                     {store.best_entry?.brand && <p className="text-[11px] text-slate-400 truncate">Marca: {store.best_entry.brand}</p>}
+                    {paymentConditionLabel(store.best_entry) && <p className="text-[11px] font-semibold text-blue-600 truncate">Con {paymentConditionLabel(store.best_entry)}</p>}
                   </div>
                 </div>
 
                 <div className="text-right shrink-0">
                   <p className="font-black text-brand-600 text-base">{formatUnitPrice(store.min_unit_price, group.unit)}</p>
-                  <p className="text-xs text-slate-400">Compra real: {formatCLP(store.best_entry?.price)}</p>
+                  <p className="text-xs text-slate-400">Compra real: {formatCLP(effectivePrice(store.best_entry))}</p>
                   <p className="text-[11px] text-slate-400">{store.sample_count} registro{store.sample_count === 1 ? '' : 's'}</p>
                   {i === 0 && <span className="badge-lowest mt-1">Mejor estándar</span>}
                 </div>

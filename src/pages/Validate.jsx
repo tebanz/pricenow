@@ -1,8 +1,23 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
+import { calcUnitPrice } from '../utils/priceCalc'
+import { calculateDiscountFinalPrice, DISCOUNT_TYPES, effectivePrice, hasOffer, paymentConditionLabel, PAYMENT_METHODS, paymentMethodLabel } from '../utils/discounts'
 
 const UNITS = ['unidad', 'kg', 'g', 'litro', 'ml', 'metro', 'par', 'caja']
+const OPTIONAL_DISCOUNT_COLUMNS = [
+  'has_discount',
+  'normal_price',
+  'final_price',
+  'discount_type',
+  'discount_amount',
+  'discount_percentage',
+  'promotion_description',
+  'payment_method',
+  'payment_condition',
+  'requires_specific_payment_method',
+  'baes_eligibility_status',
+]
 
 function normalize(text = '') {
   return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
@@ -32,6 +47,12 @@ function reportHasCoords(entry) {
 function formatCoords(lat, lng) {
   if (lat == null || lng == null) return 'Sin coordenadas'
   return `${Number(lat).toFixed(7)}, ${Number(lng).toFixed(7)}`
+}
+
+function storedDiscountValue(entry) {
+  if (entry.discount_type === 'porcentaje') return entry.discount_percentage ?? ''
+  if (entry.discount_type === 'precio_promocional') return entry.final_price ?? ''
+  return entry.discount_amount ?? ''
 }
 
 function SuggestionLine({ label, value, action }) {
@@ -118,11 +139,28 @@ export default function Validate() {
     const current = corrections[entry.id] || {}
     const productSuggestion = product?.score >= 0.34 ? product : null
     const storeSuggestion = store?.score >= 0.34 ? store : null
+    const hasDiscount = current.has_discount ?? Boolean(entry.has_discount)
+    const discountType = current.discount_type ?? entry.discount_type ?? 'monto'
+    const discountValue = current.discount_value ?? storedDiscountValue(entry)
+    const normalPrice = current.normal_price ?? entry.normal_price ?? entry.price
+    const finalPrice = hasDiscount
+      ? calculateDiscountFinalPrice(normalPrice, discountType, discountValue)
+      : effectivePrice(entry)
     return {
       product_name: current.product_name ?? productSuggestion?.name ?? entry.product_name,
       unit: current.unit ?? productSuggestion?.default_unit ?? entry.unit,
       store_name: current.store_name ?? storeSuggestion?.name ?? entry.store_name,
       sector: current.sector ?? storeSuggestion?.sector ?? entry.sector,
+      has_discount: hasDiscount,
+      normal_price: normalPrice ?? '',
+      discount_type: discountType,
+      discount_value: discountValue,
+      final_price: current.final_price ?? finalPrice,
+      promotion_description: current.promotion_description ?? entry.promotion_description ?? '',
+      payment_method: current.payment_method ?? entry.payment_method ?? 'efectivo',
+      requires_specific_payment_method: current.requires_specific_payment_method ?? Boolean(entry.requires_specific_payment_method),
+      payment_condition: current.payment_condition ?? entry.payment_condition ?? '',
+      baes_eligibility_status: current.baes_eligibility_status ?? entry.baes_eligibility_status ?? '',
     }
   }
 
@@ -133,6 +171,25 @@ export default function Validate() {
     }
     if (suggestedStore?.score >= 0.34) return suggestedStore
     return null
+  }
+
+  async function updatePriceEntry(entryId, patch) {
+    let nextPatch = { ...patch }
+    let result = null
+
+    for (let attempt = 0; attempt < OPTIONAL_DISCOUNT_COLUMNS.length + 1; attempt += 1) {
+      result = await supabase.from('price_entries').update(nextPatch).eq('id', entryId)
+      if (!result.error) return result
+
+      const message = result.error.message || ''
+      const missingColumn = OPTIONAL_DISCOUNT_COLUMNS.find(column => nextPatch[column] !== undefined && new RegExp(column, 'i').test(message))
+      if (!missingColumn || !/(column|schema cache|could not find)/i.test(message)) return result
+
+      const { [missingColumn]: _removed, ...fallbackPatch } = nextPatch
+      nextPatch = fallbackPatch
+    }
+
+    return result
   }
 
   async function approve(entry, mode = 'raw') {
@@ -150,6 +207,19 @@ export default function Validate() {
       patch.unit = draft.unit || entry.unit
       patch.store_name = draft.store_name.trim()
       patch.sector = draft.sector.trim() || entry.sector
+      patch.has_discount = Boolean(draft.has_discount)
+      patch.normal_price = draft.has_discount ? Number(draft.normal_price || entry.price) : null
+      patch.final_price = draft.has_discount ? calculateDiscountFinalPrice(draft.normal_price || entry.price, draft.discount_type, draft.discount_value) : null
+      patch.price = draft.has_discount ? Number(draft.normal_price || entry.price) : Number(entry.price)
+      patch.unit_price = calcUnitPrice(draft.has_discount ? patch.final_price : patch.price, entry.quantity, patch.unit)
+      patch.discount_type = draft.has_discount ? draft.discount_type : null
+      patch.discount_amount = draft.has_discount && draft.discount_type === 'monto' ? Number(draft.discount_value) : null
+      patch.discount_percentage = draft.has_discount && draft.discount_type === 'porcentaje' ? Number(draft.discount_value) : null
+      patch.promotion_description = draft.has_discount ? draft.promotion_description.trim() || null : null
+      patch.payment_method = draft.payment_method || null
+      patch.requires_specific_payment_method = Boolean(draft.requires_specific_payment_method)
+      patch.payment_condition = draft.requires_specific_payment_method ? draft.payment_condition.trim() || paymentMethodLabel(draft.payment_method) : null
+      patch.baes_eligibility_status = draft.payment_method === 'junaeb_baes' ? 'eligible' : draft.baes_eligibility_status || null
 
       if (product?.score >= 0.34 && normalize(draft.product_name) === normalize(product.name)) {
         patch.product_id = product.id
@@ -160,7 +230,7 @@ export default function Validate() {
     }
 
     setSaving(true)
-    const { error } = await supabase.from('price_entries').update(patch).eq('id', entry.id)
+    const { error } = await updatePriceEntry(entry.id, patch)
     setSaving(false)
     if (error) return setMessage({ type: 'error', text: error.message })
     setCorrections(prev => {
@@ -253,7 +323,12 @@ export default function Validate() {
               </div>
 
               <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Precio</p><b>{money(entry.price)}</b></div>
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <p className="text-xs text-slate-400">Precio usado</p>
+                  <b>{money(effectivePrice(entry))}</b>
+                  {hasOffer(entry) && <p className="mt-1 text-[11px] font-black text-emerald-700">Oferta{entry.normal_price || entry.price ? ` · normal ${money(entry.normal_price || entry.price)}` : ''}</p>}
+                  {paymentConditionLabel(entry) && <p className="mt-1 text-[11px] font-semibold text-blue-700">Con {paymentConditionLabel(entry)}</p>}
+                </div>
                 <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Unitario</p><b>{money(entry.unit_price)} / {entry.unit}</b></div>
                 <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Producto escrito</p><b>{entry.product_name}</b></div>
                 <div className="rounded-2xl bg-slate-50 p-3"><p className="text-xs text-slate-400">Negocio escrito</p><b>{entry.store_name}</b></div>
@@ -298,6 +373,51 @@ export default function Validate() {
                     <label className="grid gap-1 text-xs font-bold text-slate-500">Sector corregido
                       <input value={draft.sector} onChange={e => updateCorrection(entry.id, { sector: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" />
                     </label>
+                  </div>
+
+                  <div className="mt-3 grid gap-2 rounded-2xl border border-slate-100 p-3 text-sm">
+                    <label className="flex items-center justify-between gap-3 text-sm font-black text-slate-700">
+                      Producto con descuento
+                      <input type="checkbox" checked={Boolean(draft.has_discount)} onChange={e => updateCorrection(entry.id, { has_discount: e.target.checked })} />
+                    </label>
+                    {draft.has_discount && (
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <label className="grid gap-1 text-xs font-bold text-slate-500">Precio normal
+                          <input type="number" value={draft.normal_price} onChange={e => updateCorrection(entry.id, { normal_price: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" />
+                        </label>
+                        <label className="grid gap-1 text-xs font-bold text-slate-500">Tipo descuento
+                          <select value={draft.discount_type} onChange={e => updateCorrection(entry.id, { discount_type: e.target.value, discount_value: '' })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900">
+                            {DISCOUNT_TYPES.map(type => <option key={type.value} value={type.value}>{type.label}</option>)}
+                          </select>
+                        </label>
+                        <label className="grid gap-1 text-xs font-bold text-slate-500">Valor descuento
+                          <input type="number" value={draft.discount_value} onChange={e => updateCorrection(entry.id, { discount_value: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" />
+                        </label>
+                        <div className="rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">
+                          Precio final: {money(calculateDiscountFinalPrice(draft.normal_price, draft.discount_type, draft.discount_value))}
+                        </div>
+                        <label className="grid gap-1 text-xs font-bold text-slate-500 sm:col-span-2">Descripcion promocion
+                          <input value={draft.promotion_description} onChange={e => updateCorrection(entry.id, { promotion_description: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" />
+                        </label>
+                      </div>
+                    )}
+
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="grid gap-1 text-xs font-bold text-slate-500">Metodo de pago
+                        <select value={draft.payment_method} onChange={e => updateCorrection(entry.id, { payment_method: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900">
+                          {PAYMENT_METHODS.map(method => <option key={method.value} value={method.value}>{method.label}</option>)}
+                        </select>
+                      </label>
+                      <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600">
+                        Exige este metodo
+                        <input type="checkbox" checked={Boolean(draft.requires_specific_payment_method)} onChange={e => updateCorrection(entry.id, { requires_specific_payment_method: e.target.checked })} />
+                      </label>
+                      {draft.requires_specific_payment_method && (
+                        <label className="grid gap-1 text-xs font-bold text-slate-500 sm:col-span-2">Condicion de pago
+                          <input value={draft.payment_condition} onChange={e => updateCorrection(entry.id, { payment_condition: e.target.value })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900" placeholder={`Ej: solo con ${paymentMethodLabel(draft.payment_method)}`} />
+                        </label>
+                      )}
+                    </div>
                   </div>
 
                   <div className="mt-3 grid grid-cols-3 gap-2">
