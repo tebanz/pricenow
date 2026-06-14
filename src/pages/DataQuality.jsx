@@ -4,6 +4,25 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 
 const UNITS = ['unidad', 'kg', 'g', 'litro', 'ml', 'metro', 'par', 'caja']
+const LOCATION_FIELDS = [
+  ['region', 'Region'],
+  ['city', 'Ciudad'],
+  ['commune', 'Comuna'],
+  ['sector', 'Sector'],
+]
+const KNOWN_SECTOR_NAMES = new Set([
+  'centro',
+  'manzanal',
+  'el tenis',
+  'manso de velasco',
+  'san francisco',
+  'rene schneider',
+  'villa triana',
+  'los lirios',
+  'recreo',
+  'la compania',
+  'la compana',
+])
 
 function normalize(text = '') {
   return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
@@ -19,7 +38,13 @@ function sim(a, b) {
 }
 
 function hasCoords(row) {
-  return row?.latitude != null && row?.longitude != null && Number.isFinite(Number(row.latitude)) && Number.isFinite(Number(row.longitude))
+  if (row?.latitude == null || row?.longitude == null) return false
+  if (String(row.latitude).trim() === '' || String(row.longitude).trim() === '') return false
+  const lat = Number(row.latitude)
+  const lng = Number(row.longitude)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false
+  if (lat === 0 && lng === 0) return false
+  return Math.abs(lat) <= 90 && Math.abs(lng) <= 180
 }
 
 function Field({ label, children }) {
@@ -35,6 +60,23 @@ function Pill({ children, tone = 'slate' }) {
     red: 'bg-red-50 text-red-700',
   }
   return <span className={`rounded-full px-2 py-1 text-[11px] font-bold ${tones[tone]}`}>{children}</span>
+}
+
+function LocationChanges({ current, proposed }) {
+  return (
+    <div className="grid gap-2 rounded-2xl bg-slate-50 p-3 text-xs">
+      {LOCATION_FIELDS.map(([field, label]) => (
+        <div key={field} className="grid gap-1 sm:grid-cols-[90px_1fr]">
+          <span className="font-black uppercase tracking-wide text-slate-400">{label}</span>
+          <span className="text-slate-700">
+            <span className="font-semibold">{current[field] || 'Sin dato'}</span>
+            <span className="mx-2 text-slate-400">-&gt;</span>
+            <span className={`font-black ${current[field] === proposed[field] ? 'text-slate-500' : 'text-blue-700'}`}>{proposed[field] || 'Sin dato'}</span>
+          </span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function isRecent(value) {
@@ -64,6 +106,85 @@ function storeIssues(store, usageCount = 0) {
   return issues
 }
 
+function territorialReviewIssue(row) {
+  const city = normalize(row.city)
+  const commune = normalize(row.commune)
+  const sector = normalize(row.sector)
+  const cityLooksLikeSector = city && KNOWN_SECTOR_NAMES.has(city)
+  const cityEqualsSector = city && sector && city === sector
+
+  if (cityLooksLikeSector && (!commune || !sector || cityEqualsSector)) return 'La ciudad parece ser un sector o poblacion.'
+  if (cityEqualsSector && (!commune || commune !== city)) return 'Ciudad y sector tienen el mismo valor.'
+  return null
+}
+
+function territorialLabel(row) {
+  return [row.region, row.city, row.commune, row.sector].filter(Boolean).join(' - ') || 'Sin ubicacion territorial'
+}
+
+function itemKey(item) {
+  return `${item.source_table || item.sourceTable}-${item.source_id || item.sourceId || item.row?.id}`
+}
+
+function cleanLocationValue(value) {
+  if (value == null) return null
+  const text = value.toString().trim()
+  if (!text) return null
+  const normalized = normalize(text)
+  if (['otro', 'otro no aparece mi sector', 'sin sector', 'sin ubicacion', 'sin ubicacion territorial'].includes(normalized)) return null
+  return text
+}
+
+function sanitizeLocationPatch(raw = {}) {
+  const region = cleanLocationValue(raw.region || raw.state)
+  const city = cleanLocationValue(raw.city || raw.town || raw.locality)
+  const commune = cleanLocationValue(raw.commune || raw.municipality)
+  let sector = cleanLocationValue(raw.sector || raw.suburb || raw.district || raw.neighbourhood)
+
+  if (sector && city && normalize(sector) === normalize(city)) sector = null
+  if (sector && commune && normalize(sector) === normalize(commune)) sector = null
+
+  return { region, city, commune, sector }
+}
+
+function hasLocationValues(values = {}) {
+  return Boolean(values.region || values.city || values.commune || values.sector)
+}
+
+function valuesEqual(a = {}, b = {}) {
+  return ['region', 'city', 'commune', 'sector'].every(field => (a[field] || '') === (b[field] || ''))
+}
+
+function coordinateInfo(row = {}) {
+  const candidates = [
+    ['latitude', 'longitude'],
+    ['lat', 'lng'],
+    ['purchase_latitude', 'purchase_longitude'],
+  ]
+  for (const [latKey, lngKey] of candidates) {
+    if (hasCoords({ latitude: row[latKey], longitude: row[lngKey] })) {
+      return { lat: Number(row[latKey]), lng: Number(row[lngKey]), latKey, lngKey }
+    }
+  }
+  return null
+}
+
+function currentLocationValues(row = {}) {
+  return {
+    region: cleanLocationValue(row.region),
+    city: cleanLocationValue(row.city),
+    commune: cleanLocationValue(row.commune),
+    sector: cleanLocationValue(row.sector),
+  }
+}
+
+function locationSourceLabel(source) {
+  if (source === 'reverse_geocode') return 'GPS / Geoapify'
+  if (source === 'store') return 'Negocio corregido'
+  if (source === 'manual') return 'Edicion manual'
+  return 'Sin propuesta'
+}
+
 function buildUsage(entries, field) {
   return entries.reduce((acc, entry) => {
     const id = entry[field]
@@ -91,11 +212,16 @@ function duplicatePairs(items, getText, minScore = 0.62) {
 }
 
 export default function DataQuality() {
-  const { isValidator } = useAuth()
+  const { isValidator, user } = useAuth()
   const [tab, setTab] = useState('reportes')
   const [products, setProducts] = useState([])
   const [stores, setStores] = useState([])
   const [entries, setEntries] = useState([])
+  const [territorialReview, setTerritorialReview] = useState([])
+  const [territorialDrafts, setTerritorialDrafts] = useState({})
+  const [ignoredTerritorialItems, setIgnoredTerritorialItems] = useState({})
+  const [territorialBusyKey, setTerritorialBusyKey] = useState(null)
+  const [territorialBatchLoading, setTerritorialBatchLoading] = useState(false)
   const [message, setMessage] = useState(null)
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
@@ -104,15 +230,18 @@ export default function DataQuality() {
 
   async function load() {
     setLoading(true)
-    const [p, s, e] = await Promise.all([
+    const [p, s, e, t] = await Promise.all([
       supabase.from('products').select('*').order('name').limit(900),
       supabase.from('stores').select('*').order('name').limit(900),
       supabase.from('price_entries').select('*').order('created_at', { ascending: false }).limit(240),
+      supabase.from('territorial_location_review').select('*').limit(200),
     ])
     if (p.error || s.error || e.error) setMessage({ type: 'error', text: p.error?.message || s.error?.message || e.error?.message })
+    if (t.error) console.warn('PriceNow territorial review view unavailable:', t.error.message)
     setProducts(p.data || [])
     setStores(s.data || [])
     setEntries(e.data || [])
+    setTerritorialReview(t.data || [])
     setLoading(false)
   }
 
@@ -152,6 +281,34 @@ export default function DataQuality() {
 
   const productDuplicates = useMemo(() => duplicatePairs(activeProducts, p => `${p.name} ${p.category || ''}`, 0.67), [activeProducts])
   const storeDuplicates = useMemo(() => duplicatePairs(activeStores, s => `${s.name} ${s.sector || ''} ${s.address || ''}`, 0.6), [activeStores])
+  const territorialIssues = useMemo(() => {
+    const q = normalize(query)
+    const fromView = territorialReview.map(viewRow => {
+      const isStore = viewRow.source_table === 'stores'
+      const row = isStore
+        ? activeStores.find(store => String(store.id) === String(viewRow.source_id)) || viewRow
+        : entries.find(entry => String(entry.id) === String(viewRow.source_id)) || viewRow
+      return {
+        kind: isStore ? 'Negocio' : 'Reporte',
+        sourceTable: viewRow.source_table,
+        sourceId: viewRow.source_id,
+        label: viewRow.label || (isStore ? row.name : `${row.product_name || 'Producto'} en ${row.store_name || 'tienda'}`),
+        row,
+        issue: viewRow.issue || territorialReviewIssue(row) || 'Ubicacion territorial para revisar.',
+      }
+    })
+    const fallbackRows = [
+      ...entries.map(entry => ({ kind: 'Reporte', sourceTable: 'price_entries', sourceId: entry.id, label: `${entry.product_name || 'Producto'} en ${entry.store_name || 'tienda'}`, row: entry })),
+      ...activeStores.map(store => ({ kind: 'Negocio', sourceTable: 'stores', sourceId: store.id, label: store.name || 'Negocio sin nombre', row: store })),
+    ]
+      .map(item => ({ ...item, issue: territorialReviewIssue(item.row) }))
+      .filter(item => item.issue)
+    const rows = fromView.length ? fromView : fallbackRows
+    return rows
+      .filter(item => !ignoredTerritorialItems[itemKey(item)])
+      .filter(item => q ? normalize(`${item.kind} ${item.label} ${territorialLabel(item.row)} ${item.issue}`).includes(q) : true)
+      .slice(0, 120)
+  }, [territorialReview, entries, activeStores, ignoredTerritorialItems, query])
 
   function productSuggestion(entry) {
     return activeProducts.map(p => ({ ...p, score: sim(entry.product_name, p.name) })).sort((a, b) => b.score - a.score)[0]
@@ -202,6 +359,185 @@ export default function DataQuality() {
     await load()
   }
 
+  async function reverseLocationFromCoords(coords) {
+    const response = await fetch(`/api/reverse-geocode?${new URLSearchParams({ lat: String(coords.lat), lng: String(coords.lng) }).toString()}`)
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || 'No se pudo consultar la ubicacion.')
+    return sanitizeLocationPatch(data.zone || {})
+  }
+
+  async function getFullTerritorialRow(item) {
+    if (item.row?.id) return item.row
+    const { data, error } = await supabase
+      .from(item.sourceTable)
+      .select('*')
+      .eq('id', item.sourceId)
+      .maybeSingle()
+    if (error) throw error
+    return data || item.row || {}
+  }
+
+  function storeLocationForEntry(entry) {
+    if (!entry?.store_id) return null
+    const store = activeStores.find(item => String(item.id) === String(entry.store_id))
+    if (!store) return null
+    const values = sanitizeLocationPatch(store)
+    if (!hasLocationValues(values)) return null
+    if (territorialReviewIssue(values)) return null
+    return { store, values }
+  }
+
+  async function buildTerritorialProposal(item) {
+    const row = await getFullTerritorialRow(item)
+    if (item.sourceTable === 'price_entries') {
+      const linkedStore = storeLocationForEntry(row)
+      if (linkedStore) {
+        return {
+          proposed: linkedStore.values,
+          source: 'store',
+          note: `Heredado desde negocio corregido: ${linkedStore.store.name || linkedStore.store.id}.`,
+        }
+      }
+    }
+
+    const coords = coordinateInfo(row)
+    if (!coords) {
+      return {
+        proposed: currentLocationValues(row),
+        source: 'manual',
+        note: 'Sin store corregido ni coordenadas validas. Requiere revision manual.',
+        editing: true,
+      }
+    }
+
+    const proposed = await reverseLocationFromCoords(coords)
+    return {
+      proposed,
+      source: 'reverse_geocode',
+      note: `Propuesto desde ${coords.latKey}/${coords.lngKey}.`,
+      coords,
+      editing: false,
+    }
+  }
+
+  async function proposeTerritorialLocation(item) {
+    const key = itemKey(item)
+    setTerritorialBusyKey(key)
+    setMessage(null)
+    try {
+      const draft = await buildTerritorialProposal(item)
+      if (!hasLocationValues(draft.proposed)) {
+        setMessage({ type: 'error', text: 'No hay datos suficientes para proponer ubicacion. Edita manualmente o ignora por ahora.' })
+      }
+      setTerritorialDrafts(prev => ({ ...prev, [key]: draft }))
+    } catch (err) {
+      console.error('PriceNow territorial proposal failed:', err)
+      setMessage({ type: 'error', text: err.message || 'No se pudo proponer ubicacion.' })
+    } finally {
+      setTerritorialBusyKey(null)
+    }
+  }
+
+  async function proposeTerritorialBatch() {
+    const pending = territorialIssues
+      .filter(item => !territorialDrafts[itemKey(item)])
+      .slice(0, 5)
+    if (!pending.length) return
+
+    setTerritorialBatchLoading(true)
+    for (const item of pending) {
+      // Sequential and small on purpose: avoids bursts against Geoapify.
+      // eslint-disable-next-line no-await-in-loop
+      await proposeTerritorialLocation(item)
+    }
+    setTerritorialBatchLoading(false)
+  }
+
+  function startManualTerritorialEdit(item) {
+    const key = itemKey(item)
+    setTerritorialDrafts(prev => ({
+      ...prev,
+      [key]: {
+        proposed: prev[key]?.proposed || currentLocationValues(item.row),
+        source: 'manual',
+        note: 'Editado manualmente.',
+        editing: true,
+      },
+    }))
+  }
+
+  function updateTerritorialDraft(item, field, value) {
+    const key = itemKey(item)
+    const previousDraft = territorialDrafts[key] || {}
+    const baseProposal = previousDraft.proposed || currentLocationValues(item.row)
+    setTerritorialDrafts(prev => ({
+      ...prev,
+      [key]: {
+        ...previousDraft,
+        source: 'manual',
+        note: 'Editado manualmente.',
+        editing: true,
+        proposed: sanitizeLocationPatch({
+          ...baseProposal,
+          [field]: value,
+        }),
+      },
+    }))
+  }
+
+  async function logTerritorialCorrection(item, action, proposedValues = {}, appliedValues = null) {
+    const payload = {
+      source_table: item.sourceTable,
+      source_id: String(item.sourceId),
+      action,
+      previous_values: currentLocationValues(item.row),
+      proposed_values: proposedValues || {},
+      applied_values: appliedValues,
+      issue: item.issue || null,
+      created_by: user?.id || null,
+    }
+    const { error } = await supabase.from('territorial_corrections').insert(payload)
+    if (error) console.warn('PriceNow territorial audit skipped:', error.message)
+  }
+
+  async function applyTerritorialCorrection(item) {
+    const key = itemKey(item)
+    const draft = territorialDrafts[key]
+    const proposed = sanitizeLocationPatch(draft?.proposed || {})
+    if (!hasLocationValues(proposed)) {
+      setMessage({ type: 'error', text: 'No hay una propuesta valida para aplicar.' })
+      return
+    }
+
+    setTerritorialBusyKey(key)
+    setSaving(true)
+    setMessage(null)
+    const patch = { ...proposed, updated_at: new Date().toISOString() }
+    const { error } = await supabase.from(item.sourceTable).update(patch).eq('id', item.sourceId)
+    if (!error) await logTerritorialCorrection(item, 'applied', proposed, proposed)
+    setSaving(false)
+    setTerritorialBusyKey(null)
+
+    if (error) {
+      setMessage({ type: 'error', text: error.message })
+      return
+    }
+
+    setTerritorialDrafts(prev => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+    setMessage({ type: 'ok', text: 'Correccion territorial aplicada.' })
+    await load()
+  }
+
+  async function ignoreTerritorialItem(item) {
+    const key = itemKey(item)
+    setIgnoredTerritorialItems(prev => ({ ...prev, [key]: true }))
+    await logTerritorialCorrection(item, 'ignored', {}, null)
+  }
+
   function prepareMerge(kind, left, right) {
     const usage = kind === 'producto' ? productUsage : storeUsage
     const leftCount = usage[left.id] || 0
@@ -250,8 +586,8 @@ export default function DataQuality() {
 
       {message && <div className={`rounded-2xl border p-3 text-sm font-semibold ${message.type === 'error' ? 'border-red-100 bg-red-50 text-red-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>{message.text}</div>}
 
-      <div className="grid grid-cols-4 gap-2 rounded-2xl bg-slate-100 p-1 text-xs font-black">
-        {['reportes','productos','negocios','duplicados'].map(item => <button key={item} onClick={() => setTab(item)} className={`rounded-xl py-2 ${tab === item ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500'}`}>{item}</button>)}
+      <div className="grid grid-cols-5 gap-2 rounded-2xl bg-slate-100 p-1 text-xs font-black">
+        {['reportes','productos','negocios','duplicados','territorio'].map(item => <button key={item} onClick={() => setTab(item)} className={`rounded-xl py-2 ${tab === item ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500'}`}>{item}</button>)}
       </div>
 
       <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar..." className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" />
@@ -331,6 +667,89 @@ export default function DataQuality() {
             </div>
           ))}
           {storesForQuality.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-slate-500 shadow-sm">No hay negocios sin coordenadas o con ese filtro.</p>}
+        </section>
+      )}
+
+      {tab === 'territorio' && (
+        <section className="space-y-3">
+          <div className="rounded-[2rem] border border-amber-100 bg-amber-50 p-4 text-sm text-amber-900">
+            <p className="font-black">Ubicacion territorial para revisar</p>
+            <p className="mt-1">Estos registros vienen de territorial_location_review. PriceNow propone correcciones con coordenadas o negocio corregido, pero nunca inventa ubicacion.</p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <button type="button" onClick={proposeTerritorialBatch} disabled={territorialBatchLoading || territorialIssues.length === 0} className="rounded-2xl bg-blue-600 px-4 py-3 text-center text-sm font-black text-white disabled:opacity-50">
+              {territorialBatchLoading ? 'Proponiendo...' : 'Proponer lote pequeno'}
+            </button>
+            <Link to="/local-map" className="block rounded-2xl bg-slate-950 px-4 py-3 text-center text-sm font-black text-white">Abrir administrador territorial</Link>
+          </div>
+          {territorialIssues.map(item => {
+            const key = itemKey(item)
+            const current = currentLocationValues(item.row)
+            const draft = territorialDrafts[key]
+            const proposed = sanitizeLocationPatch(draft?.proposed || {})
+            const coords = coordinateInfo(item.row)
+            const canApply = hasLocationValues(proposed) && !valuesEqual(current, proposed)
+            const busy = territorialBusyKey === key
+            return (
+              <div key={key} className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-black text-slate-900">{item.label}</p>
+                    <p className="mt-1 text-xs text-slate-500">{item.kind} - {territorialLabel(item.row)}</p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      {coords ? `Coordenadas: ${coords.latKey}/${coords.lngKey}` : 'Sin coordenadas validas'}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <Pill tone="amber">revisar</Pill>
+                    {draft && <Pill tone={draft.source === 'manual' ? 'blue' : 'green'}>{locationSourceLabel(draft.source)}</Pill>}
+                  </div>
+                </div>
+                <p className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-600">{item.issue}</p>
+
+                {draft ? (
+                  <div className="mt-3 space-y-3">
+                    <LocationChanges current={current} proposed={proposed} />
+                    {draft.note && <p className="text-xs font-semibold text-slate-500">{draft.note}</p>}
+                    {draft.editing && (
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {LOCATION_FIELDS.map(([field, label]) => (
+                          <Field key={field} label={label}>
+                            <input
+                              value={proposed[field] || ''}
+                              onChange={event => updateTerritorialDraft(item, field, event.target.value)}
+                              className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-normal text-slate-900"
+                              placeholder={field === 'sector' ? 'Opcional' : label}
+                            />
+                          </Field>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-xs text-slate-500">
+                    Presiona "Proponer ubicacion" para consultar coordenadas o heredar desde el negocio corregido.
+                  </div>
+                )}
+
+                <div className="mt-3 grid gap-2 sm:grid-cols-4">
+                  <button type="button" onClick={() => proposeTerritorialLocation(item)} disabled={busy || territorialBatchLoading} className="rounded-2xl bg-blue-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">
+                    {busy ? 'Revisando...' : 'Proponer ubicacion'}
+                  </button>
+                  <button type="button" onClick={() => applyTerritorialCorrection(item)} disabled={busy || saving || !canApply} className="rounded-2xl bg-emerald-600 px-3 py-3 text-xs font-black text-white disabled:opacity-50">
+                    Aplicar correccion
+                  </button>
+                  <button type="button" onClick={() => startManualTerritorialEdit(item)} disabled={busy} className="rounded-2xl bg-slate-100 px-3 py-3 text-xs font-black text-slate-700 disabled:opacity-50">
+                    Editar manualmente
+                  </button>
+                  <button type="button" onClick={() => ignoreTerritorialItem(item)} disabled={busy} className="rounded-2xl bg-amber-50 px-3 py-3 text-xs font-black text-amber-700 disabled:opacity-50">
+                    Ignorar por ahora
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+          {territorialIssues.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-slate-500 shadow-sm">No hay ubicaciones territoriales sospechosas con ese filtro.</p>}
         </section>
       )}
 

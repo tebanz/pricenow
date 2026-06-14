@@ -194,7 +194,7 @@ function initialsFromProfile(profile, user) {
 }
 
 function avatarSeed(profile, user) {
-  return encodeURIComponent(profile?.username || user?.email || 'PriceNow')
+  return encodeURIComponent(profile?.username || user?.email || 'EdePrecios')
 }
 
 export default function Profile() {
@@ -505,7 +505,7 @@ export default function Profile() {
       <div>
         <h2 className="text-xl font-bold text-slate-900">Mi perfil</h2>
         <p className="text-sm text-slate-500 mt-0.5">
-          Gestiona tu identidad, puntos, futuros beneficios y preferencias de PriceNow.
+          Gestiona tu identidad, puntos, futuros beneficios y preferencias de EdePrecios.
         </p>
       </div>
 
@@ -795,7 +795,7 @@ export default function Profile() {
         <div className="space-y-4">
           <section className="card">
             <h3 className="font-bold text-slate-900 mb-1">Editar perfil</h3>
-            <p className="text-xs text-slate-500 mb-4">Ajusta cómo se muestra tu cuenta dentro de PriceNow.</p>
+            <p className="text-xs text-slate-500 mb-4">Ajusta cómo se muestra tu cuenta dentro de EdePrecios.</p>
             <form onSubmit={saveProfile} className="space-y-3">
               <div>
                 <label className="input-label">Nombre público</label>
@@ -905,7 +905,7 @@ export default function Profile() {
           <section className="card bg-slate-900 text-white border-slate-900">
             <h3 className="font-bold">Beneficios en preparacion</h3>
             <p className="text-sm text-white/70 mt-1">
-              Beneficios y cupones quedan como modulo futuro mientras PriceNow mantiene la navegacion principal enfocada en precios.
+              Beneficios y cupones quedan como modulo futuro mientras EdePrecios mantiene la navegacion principal enfocada en precios.
             </p>
           </section>
         </div>

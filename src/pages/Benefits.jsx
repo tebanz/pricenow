@@ -23,7 +23,7 @@ export default function Benefits() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="font-black text-slate-900">Modulo futuro</h2>
-            <p className="mt-1 text-sm leading-relaxed text-slate-500">Esta funcion vendra en una proxima actualizacion de PriceNow.</p>
+            <p className="mt-1 text-sm leading-relaxed text-slate-500">Esta funcion vendra en una proxima actualizacion de EdePrecios.</p>
           </div>
           <span className="shrink-0 rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">Prox.</span>
         </div>

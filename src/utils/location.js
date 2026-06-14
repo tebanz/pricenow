@@ -29,15 +29,25 @@ export function formatDistance(meters) {
 export const PRICE_NOW_ZONE_KEY = 'pricenow_current_zone'
 export const PRICE_NOW_ZONE_EVENT = 'pricenow-zone-change'
 
+export function zoneCity(zone = {}) {
+  return zone?.city || zone?.commune || zone?.municipality || ''
+}
+
+export function zoneSector(zone = {}) {
+  return zone?.sector || zone?.suburb || zone?.district || zone?.neighbourhood || ''
+}
+
 export function zoneDisplayName(zone) {
-  return zone?.commune || zone?.municipality || zone?.city || zone?.region || 'Chile'
+  return zoneCity(zone) || zone?.region || 'Chile'
 }
 
 export function zoneSubtitle(zone) {
-  const commune = zoneDisplayName(zone)
+  const city = zoneDisplayName(zone)
+  const sector = zoneSector(zone)
   const region = zone?.region || zone?.state
-  if (commune && region && commune !== region) return `${commune}, ${region}`
-  return commune
+  const base = sector ? `${city} - Sector ${sector}` : city
+  if (base && region && base !== region) return `${base}, ${region}`
+  return base
 }
 
 export function normalizeZoneName(value = '') {
@@ -90,9 +100,42 @@ export async function reverseGeocode(lat, lng) {
 }
 
 export function rowCommune(row = {}) {
-  return row.commune || row.city || row.sector || ''
+  return row.commune || row.city || ''
+}
+
+export function rowCity(row = {}) {
+  return row.city || row.commune || ''
+}
+
+export function rowSector(row = {}) {
+  return row.sector || ''
 }
 
 export function sameCommune(a = '', b = '') {
   return normalizeZoneName(a) && normalizeZoneName(a) === normalizeZoneName(b)
+}
+
+export function sameCity(a = '', b = '') {
+  return normalizeZoneName(a) && normalizeZoneName(a) === normalizeZoneName(b)
+}
+
+export function sameSector(a = '', b = '') {
+  return normalizeZoneName(a) && normalizeZoneName(a) === normalizeZoneName(b)
+}
+
+export function rowMatchesCity(row = {}, zone = {}) {
+  const city = zoneCity(zone)
+  const commune = zoneCommune(zone)
+  const rowCityName = rowCity(row)
+  const rowCommuneName = rowCommune(row)
+  return Boolean(
+    (city && (sameCity(rowCityName, city) || sameCity(rowCommuneName, city))) ||
+    (commune && (sameCommune(rowCommuneName, commune) || sameCommune(rowCityName, commune)))
+  )
+}
+
+export function rowMatchesSector(row = {}, zone = {}, selectedSector = '') {
+  const sector = selectedSector || zoneSector(zone)
+  if (!sector) return false
+  return rowMatchesCity(row, zone) && sameSector(rowSector(row), sector)
 }

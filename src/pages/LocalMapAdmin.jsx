@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 import { mapProviderType } from '../utils/geoPlaces'
-import { formatDistance, getDistanceMeters, getStoredZone, isValidCoordinate, reverseGeocode, setStoredZone } from '../utils/location'
+import { formatDistance, getDistanceMeters, getStoredZone, isValidCoordinate, reverseGeocode, setStoredZone, zoneCity, zoneCommune, zoneSector } from '../utils/location'
 import { normalizeName } from '../utils/normalize'
 
 const STORE_TYPES = ['supermercado', 'minimarket', 'almacen', 'panaderia', 'carniceria', 'verduleria', 'feria', 'mayorista', 'farmacia', 'otro']
@@ -10,9 +10,9 @@ const SEARCH_TYPES = ['all', 'supermercado', 'minimarket', 'panaderia', 'farmaci
 const MAX_SECTOR_DETECTION_M = 50000
 
 const EMPTY_STORE = { name: '', chain: '', type: 'supermercado', sector: '', address: '', city: '', commune: '', region: '', latitude: '', longitude: '', is_verified: true, location_source: 'admin' }
-const EMPTY_SECTOR = { commune: '', name: '', latitude: '', longitude: '', radius_m: 900, is_active: true }
-const EMPTY_SEARCH = { name: '', commune: '', address: '', type: 'supermercado' }
-const EMPTY_IMPORT = { commune: '', type: 'supermercado', sector: '' }
+const EMPTY_SECTOR = { city: '', commune: '', region: '', name: '', latitude: '', longitude: '', radius_m: 900, is_active: true }
+const EMPTY_SEARCH = { name: '', city: '', commune: '', address: '', type: 'supermercado' }
+const EMPTY_IMPORT = { city: '', commune: '', type: 'supermercado', sector: '' }
 const EMPTY_NEARBY_SEARCH = { radius_m: '1500', type: 'all' }
 
 const normalize = normalizeName
@@ -33,6 +33,19 @@ function mapsUrl(lat, lng) {
 
 function distanceMeters(a, b) {
   return getDistanceMeters(a?.lat, a?.lng, b?.lat, b?.lng)
+}
+
+function sectorLabel(sector) {
+  const city = sector?.city || sector?.commune || 'Sin ciudad'
+  const commune = sector?.commune && normalize(sector.commune) !== normalize(city) ? ` / ${sector.commune}` : ''
+  return `${city}${commune} - ${sector?.name || 'Sin sector'}`
+}
+
+function sectorMatchesPlace(sector, city, commune) {
+  const filters = [city, commune].map(value => normalize(value)).filter(Boolean)
+  if (!filters.length) return true
+  const values = [sector?.city, sector?.commune].map(value => normalize(value)).filter(Boolean)
+  return filters.some(value => values.includes(value))
 }
 
 function mapOsmType(type = '') {
@@ -106,7 +119,9 @@ function CandidateCard({ candidate, duplicate, onSelect, onSave, saving }) {
 export default function LocalMapAdmin() {
   const { user, isValidator } = useAuth()
   const preferredZone = getStoredZone()
-  const defaultCommune = preferredZone?.commune || ''
+  const defaultCity = zoneCity(preferredZone) || ''
+  const defaultCommune = zoneCommune(preferredZone) || defaultCity
+  const defaultRegion = preferredZone?.region || preferredZone?.state || ''
   const [stores, setStores] = useState([])
   const [sectors, setSectors] = useState([])
   const [query, setQuery] = useState('')
@@ -118,14 +133,14 @@ export default function LocalMapAdmin() {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
   const [position, setPosition] = useState(null)
-  const [storeForm, setStoreForm] = useState(EMPTY_STORE)
-  const [sectorForm, setSectorForm] = useState({ ...EMPTY_SECTOR, commune: defaultCommune })
+  const [storeForm, setStoreForm] = useState({ ...EMPTY_STORE, city: defaultCity, commune: defaultCommune, region: defaultRegion })
+  const [sectorForm, setSectorForm] = useState({ ...EMPTY_SECTOR, city: defaultCity, commune: defaultCommune, region: defaultRegion })
   const [editingStoreId, setEditingStoreId] = useState(null)
   const [editingSectorId, setEditingSectorId] = useState(null)
-  const [searchForm, setSearchForm] = useState({ ...EMPTY_SEARCH, commune: defaultCommune })
+  const [searchForm, setSearchForm] = useState({ ...EMPTY_SEARCH, city: defaultCity, commune: defaultCommune })
   const [searchResults, setSearchResults] = useState([])
   const [searchLoading, setSearchLoading] = useState(false)
-  const [importForm, setImportForm] = useState({ ...EMPTY_IMPORT, commune: defaultCommune })
+  const [importForm, setImportForm] = useState({ ...EMPTY_IMPORT, city: defaultCity, commune: defaultCommune })
   const [importCandidates, setImportCandidates] = useState([])
   const [importLoading, setImportLoading] = useState(false)
   const [nearbyForm, setNearbyForm] = useState(EMPTY_NEARBY_SEARCH)
@@ -167,9 +182,17 @@ export default function LocalMapAdmin() {
   const filteredSectors = useMemo(() => {
     const q = normalize(sectorQuery)
     return activeSectors
-      .filter(sector => !q || normalize(`${sector.commune} ${sector.name}`).includes(q))
+      .filter(sector => !q || normalize(`${sector.city} ${sector.commune} ${sector.name}`).includes(q))
       .slice(0, 120)
   }, [activeSectors, sectorQuery])
+
+  const storeSectorOptions = useMemo(() => {
+    return activeSectors.filter(sector => sectorMatchesPlace(sector, storeForm.city, storeForm.commune))
+  }, [activeSectors, storeForm.city, storeForm.commune])
+
+  const importSectorOptions = useMemo(() => {
+    return activeSectors.filter(sector => sectorMatchesPlace(sector, importForm.city, importForm.commune))
+  }, [activeSectors, importForm.city, importForm.commune])
 
   const nearbyStores = useMemo(() => {
     if (!position) return []
@@ -205,7 +228,12 @@ export default function LocalMapAdmin() {
   }, [nearestSector, position])
 
   function sectorFromName(value) {
-    return activeSectors.find(item => item.name === value || item.id === value)
+    if (!value) return null
+    const preferredCity = storeForm.city || importForm.city || searchForm.city
+    const preferredCommune = storeForm.commune || importForm.commune || searchForm.commune
+    return activeSectors.find(item => item.id === value)
+      || activeSectors.find(item => item.name === value && sectorMatchesPlace(item, preferredCity, preferredCommune))
+      || activeSectors.find(item => item.name === value)
   }
 
   function useCurrentLocation(target = 'store') {
@@ -221,12 +249,22 @@ export default function LocalMapAdmin() {
         if (target === 'nearby') setNearbyCandidates([])
         reverseGeocode(pos.lat, pos.lng)
           .then(detectedZone => {
-            if (!detectedZone?.commune) return
+            if (!zoneCity(detectedZone)) return
             const savedZone = setStoredZone({ ...detectedZone, lat: pos.lat, lng: pos.lng, source: 'gps' })
-            const detectedCommune = savedZone?.commune || ''
-            setSectorForm(prev => ({ ...prev, commune: prev.commune || detectedCommune }))
-            setSearchForm(prev => ({ ...prev, commune: prev.commune || detectedCommune }))
-            setImportForm(prev => ({ ...prev, commune: prev.commune || detectedCommune }))
+            const detectedCity = zoneCity(savedZone)
+            const detectedCommune = zoneCommune(savedZone) || detectedCity
+            const detectedRegion = savedZone?.region || savedZone?.state || ''
+            const detectedSector = zoneSector(savedZone)
+            setStoreForm(prev => ({
+              ...prev,
+              city: prev.city || detectedCity,
+              commune: prev.commune || detectedCommune,
+              region: prev.region || detectedRegion,
+              sector: prev.sector || detectedSector,
+            }))
+            setSectorForm(prev => ({ ...prev, city: prev.city || detectedCity, commune: prev.commune || detectedCommune, region: prev.region || detectedRegion, name: prev.name || detectedSector }))
+            setSearchForm(prev => ({ ...prev, city: prev.city || detectedCity, commune: prev.commune || detectedCommune }))
+            setImportForm(prev => ({ ...prev, city: prev.city || detectedCity, commune: prev.commune || detectedCommune }))
           })
           .catch(err => console.error('PriceNow admin reverse geocode failed:', err))
         setMessage({ type: 'ok', text: `Ubicacion capturada: ${lat}, ${lng}` })
@@ -281,8 +319,9 @@ export default function LocalMapAdmin() {
 
   async function searchOsmBusinesses(event) {
     event.preventDefault()
-    if (!searchForm.name.trim() && !searchForm.address.trim() && !searchForm.commune.trim()) {
-      setMessage({ type: 'error', text: 'Escribe al menos nombre, comuna o direccion para buscar.' })
+    const searchPlace = searchForm.commune.trim() || searchForm.city.trim()
+    if (!searchForm.name.trim() && !searchForm.address.trim() && !searchPlace) {
+      setMessage({ type: 'error', text: 'Escribe al menos nombre, ciudad/comuna o direccion para buscar.' })
       return
     }
 
@@ -294,7 +333,7 @@ export default function LocalMapAdmin() {
         mode: 'search',
         query: searchForm.name,
         address: searchForm.address,
-        commune: searchForm.commune,
+        commune: searchPlace,
         type: searchForm.type,
         limit: '16',
       })
@@ -341,8 +380,9 @@ export default function LocalMapAdmin() {
 
   async function searchImportCandidates(event) {
     event.preventDefault()
-    if (!importForm.commune.trim()) {
-      setMessage({ type: 'error', text: 'Indica una comuna para importar candidatos.' })
+    const importPlace = importForm.commune.trim() || importForm.city.trim()
+    if (!importPlace) {
+      setMessage({ type: 'error', text: 'Indica ciudad o comuna para importar candidatos.' })
       return
     }
 
@@ -352,7 +392,7 @@ export default function LocalMapAdmin() {
     try {
       const params = new URLSearchParams({
         mode: 'import',
-        commune: importForm.commune,
+        commune: importPlace,
         type: importForm.type,
         radius_m: '12000',
         limit: '30',
@@ -369,14 +409,16 @@ export default function LocalMapAdmin() {
 
   function selectCandidate(candidate, preferredSector = '', verified = false) {
     const sectorName = preferredSector || candidate.sector || storeForm.sector
+    const candidateCity = candidate.city || storeForm.city || importForm.city || searchForm.city || defaultCity || candidate.commune || ''
+    const candidateCommune = candidate.commune || storeForm.commune || importForm.commune || searchForm.commune || candidateCity
     setStoreForm(prev => ({
       ...prev,
       name: candidate.name || prev.name,
       type: mapOsmType(candidate.type),
       sector: sectorName,
       address: candidate.address || prev.address,
-      city: candidate.city || candidate.commune || prev.city,
-      commune: candidate.commune || prev.commune,
+      city: candidateCity || prev.city,
+      commune: candidateCommune || prev.commune,
       region: candidate.region || prev.region,
       latitude: String(candidate.lat || ''),
       longitude: String(candidate.lng || ''),
@@ -390,7 +432,7 @@ export default function LocalMapAdmin() {
   async function insertStore(payload) {
     let nextPayload = { ...payload }
     let result = null
-    const optionalColumns = ['source', 'store_type', 'location_source', 'city', 'commune', 'region']
+    const optionalColumns = ['source', 'store_type', 'location_source', 'city', 'commune', 'region', 'sector_id']
 
     for (let attempt = 0; attempt < optionalColumns.length + 1; attempt += 1) {
       result = await supabase.from('stores').insert(nextPayload).select('id').single()
@@ -417,18 +459,19 @@ export default function LocalMapAdmin() {
     }
 
     const sector = sectorFromName(preferredSector || candidate.sector || '')
-    const candidateCommune = candidate.commune || sector?.commune || importForm.commune || searchForm.commune || preferredZone?.commune || null
+    const candidateCity = candidate.city || sector?.city || importForm.city || searchForm.city || defaultCity || candidate.commune || null
+    const candidateCommune = candidate.commune || sector?.commune || importForm.commune || searchForm.commune || defaultCommune || candidateCity
     const payload = {
       name: candidate.name.trim(),
       normalized_name: normalize(candidate.name),
       chain: null,
       type: mapOsmType(candidate.type),
       store_type: mapOsmType(candidate.type),
-      sector: sector?.name || preferredSector || candidate.sector || 'Sin sector',
+      sector: sector?.name || preferredSector || candidate.sector || null,
       sector_id: sector?.id || null,
-      city: candidate.city || candidateCommune,
+      city: candidateCity,
       commune: candidateCommune,
-      region: candidate.region || preferredZone?.region || null,
+      region: candidate.region || sector?.region || defaultRegion || null,
       address: candidate.address || null,
       ...coordinatePayload(candidate.lat, candidate.lng),
       source: candidate.source || 'geoapify',
@@ -457,9 +500,12 @@ export default function LocalMapAdmin() {
     event.preventDefault()
     setSaving(true)
     setMessage(null)
-    const fallbackCommune = sectorForm.commune.trim() || preferredZone?.commune || 'Chile'
+    const fallbackCity = sectorForm.city.trim() || defaultCity || sectorForm.commune.trim()
+    const fallbackCommune = sectorForm.commune.trim() || defaultCommune || fallbackCity
     const payload = {
+      city: fallbackCity || null,
       commune: fallbackCommune,
+      region: sectorForm.region.trim() || defaultRegion || null,
       name: sectorForm.name.trim(),
       normalized_name: normalize(sectorForm.name),
       ...coordinatePayload(sectorForm.latitude, sectorForm.longitude),
@@ -471,11 +517,11 @@ export default function LocalMapAdmin() {
 
     const result = editingSectorId
       ? await supabase.from('local_sectors').update(payload).eq('id', editingSectorId)
-      : await supabase.from('local_sectors').upsert(payload, { onConflict: 'commune,name' })
+      : await supabase.from('local_sectors').insert(payload)
 
     setSaving(false)
     if (result.error) return setMessage({ type: 'error', text: result.error.message })
-    setSectorForm({ ...EMPTY_SECTOR, commune: fallbackCommune === 'Chile' ? '' : fallbackCommune })
+    setSectorForm({ ...EMPTY_SECTOR, city: fallbackCity || '', commune: fallbackCommune || '', region: sectorForm.region || defaultRegion })
     setEditingSectorId(null)
     setMessage({ type: 'ok', text: editingSectorId ? 'Sector actualizado.' : 'Sector guardado.' })
     await load()
@@ -498,18 +544,19 @@ export default function LocalMapAdmin() {
     }
 
     const sector = sectorFromName(storeForm.sector)
-    const storeCommune = storeForm.commune || sector?.commune || preferredZone?.commune || null
+    const storeCity = storeForm.city || sector?.city || defaultCity || storeForm.commune || null
+    const storeCommune = storeForm.commune || sector?.commune || defaultCommune || storeCity
     const payload = {
       name: storeForm.name.trim(),
       normalized_name: normalize(storeForm.name),
       chain: storeForm.chain.trim() || null,
       type: storeForm.type || 'otro',
       ...(!editingStoreId ? { store_type: storeForm.type || 'otro' } : {}),
-      sector: sector?.name || storeForm.sector || 'Sin sector',
+      sector: sector?.name || storeForm.sector || null,
       sector_id: sector?.id || null,
-      city: storeForm.city || storeCommune,
+      city: storeCity,
       commune: storeCommune,
-      region: storeForm.region || preferredZone?.region || null,
+      region: storeForm.region || sector?.region || defaultRegion || null,
       address: storeForm.address.trim() || null,
       ...coords,
       location_source: storeForm.location_source || 'admin',
@@ -534,7 +581,7 @@ export default function LocalMapAdmin() {
 
     setSaving(false)
     if (result.error) return setMessage({ type: 'error', text: result.error.message })
-    setStoreForm(EMPTY_STORE)
+    setStoreForm({ ...EMPTY_STORE, city: defaultCity, commune: defaultCommune, region: defaultRegion })
     setEditingStoreId(null)
     setMessage({ type: 'ok', text: editingStoreId ? 'Negocio actualizado.' : 'Negocio guardado.' })
     await load()
@@ -580,7 +627,9 @@ export default function LocalMapAdmin() {
   function editSector(sector) {
     setEditingSectorId(sector.id)
     setSectorForm({
-      commune: sector.commune || preferredZone?.commune || '',
+      city: sector.city || sector.commune || defaultCity || '',
+      commune: sector.commune || defaultCommune || '',
+      region: sector.region || defaultRegion || '',
       name: sector.name || '',
       latitude: sector.latitude || '',
       longitude: sector.longitude || '',
@@ -592,12 +641,12 @@ export default function LocalMapAdmin() {
 
   function cancelStoreEdit() {
     setEditingStoreId(null)
-    setStoreForm(EMPTY_STORE)
+    setStoreForm({ ...EMPTY_STORE, city: defaultCity, commune: defaultCommune, region: defaultRegion })
   }
 
   function cancelSectorEdit() {
     setEditingSectorId(null)
-    setSectorForm({ ...EMPTY_SECTOR, commune: preferredZone?.commune || '' })
+    setSectorForm({ ...EMPTY_SECTOR, city: defaultCity, commune: defaultCommune, region: defaultRegion })
   }
 
   if (!isValidator) return <div className="rounded-3xl bg-white p-5 shadow-sm">Solo admin o validador puede entrar.</div>
@@ -608,7 +657,7 @@ export default function LocalMapAdmin() {
   return (
     <div className="space-y-5 pb-32">
       <section className="rounded-[2rem] bg-gradient-to-br from-blue-600 via-indigo-600 to-slate-950 p-5 text-white shadow-xl">
-        <p className="text-xs font-bold uppercase tracking-[0.25em] text-blue-100">PriceNow Local Intelligence</p>
+        <p className="text-xs font-bold uppercase tracking-[0.25em] text-blue-100">EdePrecios Local Intelligence</p>
         <h1 className="mt-2 text-2xl font-black">Negocios y sectores</h1>
         <p className="mt-2 text-sm text-blue-50">Busca negocios reales con Geoapify y OSM, revisa duplicados y guarda solo coordenadas confiables.</p>
       </section>
@@ -638,7 +687,7 @@ export default function LocalMapAdmin() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="font-black text-slate-900">Buscar negocios cercanos automaticamente</h2>
-              <FieldHint>Usa tu ubicacion actual y trae candidatos reales desde Geoapify. Si no hay resultados, PriceNow usa OSM como respaldo.</FieldHint>
+              <FieldHint>Usa tu ubicacion actual y trae candidatos reales desde Geoapify. Si no hay resultados, EdePrecios usa OSM como respaldo.</FieldHint>
             </div>
             <StatusPill tone="blue">{nearbyCandidates.length}</StatusPill>
           </div>
@@ -681,18 +730,19 @@ export default function LocalMapAdmin() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="font-black text-slate-900">Buscar negocio real</h2>
-            <FieldHint>Busca por nombre, comuna o direccion. Los resultados se revisan antes de guardar.</FieldHint>
+              <FieldHint>Busca por nombre, ciudad/comuna o direccion. Los resultados se revisan antes de guardar.</FieldHint>
             </div>
             <StatusPill tone="blue">{searchResults.length}</StatusPill>
           </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             <input value={searchForm.name} onChange={e => setSearchForm({ ...searchForm, name: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Nombre del negocio" />
+            <input value={searchForm.city} onChange={e => setSearchForm({ ...searchForm, city: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Ciudad" />
             <input value={searchForm.commune} onChange={e => setSearchForm({ ...searchForm, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna" />
             <input value={searchForm.address} onChange={e => setSearchForm({ ...searchForm, address: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm sm:col-span-2" placeholder="Direccion o referencia" />
             <select value={searchForm.type} onChange={e => setSearchForm({ ...searchForm, type: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
               {STORE_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
             </select>
-            <button disabled={searchLoading} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{searchLoading ? 'Buscando...' : 'Buscar en OSM'}</button>
+            <button disabled={searchLoading} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{searchLoading ? 'Buscando...' : 'Buscar en mapa'}</button>
           </div>
         </form>
         {searchResults.length > 0 && (
@@ -727,9 +777,14 @@ export default function LocalMapAdmin() {
               {STORE_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
             </select>
           </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <input value={storeForm.city} onChange={e => setStoreForm({ ...storeForm, city: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Ciudad" />
+            <input value={storeForm.commune} onChange={e => setStoreForm({ ...storeForm, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna" />
+            <input value={storeForm.region} onChange={e => setStoreForm({ ...storeForm, region: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Region" />
+          </div>
           <select value={storeForm.sector} onChange={e => setStoreForm({ ...storeForm, sector: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
-            <option value="">Seleccionar sector/poblacion</option>
-            {activeSectors.map(sector => <option key={sector.id} value={sector.name}>{sector.commune} - {sector.name}</option>)}
+            <option value="">Sector/poblacion opcional</option>
+            {storeSectorOptions.map(sector => <option key={sector.id} value={sector.name}>{sectorLabel(sector)}</option>)}
           </select>
           <input value={storeForm.address} onChange={e => setStoreForm({ ...storeForm, address: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Direccion" />
 
@@ -765,18 +820,19 @@ export default function LocalMapAdmin() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="font-black text-slate-900">Importar negocios conocidos</h2>
-              <FieldHint>Busca candidatos reales por comuna y tipo. PriceNow muestra duplicados posibles antes de guardar.</FieldHint>
+              <FieldHint>Busca candidatos reales por ciudad/comuna y tipo. EdePrecios muestra duplicados posibles antes de guardar.</FieldHint>
             </div>
             <StatusPill tone="blue">{importCandidates.length}</StatusPill>
           </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-4">
+          <div className="mt-3 grid gap-2 sm:grid-cols-5">
+            <input value={importForm.city} onChange={e => setImportForm({ ...importForm, city: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Ciudad" />
             <input value={importForm.commune} onChange={e => setImportForm({ ...importForm, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna" />
             <select value={importForm.type} onChange={e => setImportForm({ ...importForm, type: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
               {STORE_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
             </select>
             <select value={importForm.sector} onChange={e => setImportForm({ ...importForm, sector: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm">
               <option value="">Sector opcional</option>
-              {activeSectors.map(sector => <option key={sector.id} value={sector.name}>{sector.commune} - {sector.name}</option>)}
+              {importSectorOptions.map(sector => <option key={sector.id} value={sector.name}>{sectorLabel(sector)}</option>)}
             </select>
             <button disabled={importLoading} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{importLoading ? 'Buscando...' : 'Buscar candidatos'}</button>
           </div>
@@ -806,8 +862,10 @@ export default function LocalMapAdmin() {
           {editingSectorId && <button type="button" onClick={cancelSectorEdit} className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">Cancelar</button>}
         </div>
         <div className="mt-3 grid gap-2">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input value={sectorForm.city} onChange={e => setSectorForm({ ...sectorForm, city: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Ciudad" />
             <input value={sectorForm.commune} onChange={e => setSectorForm({ ...sectorForm, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna" />
+            <input value={sectorForm.region} onChange={e => setSectorForm({ ...sectorForm, region: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Region" />
             <input required value={sectorForm.name} onChange={e => setSectorForm({ ...sectorForm, name: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Sector / poblacion" />
           </div>
           <div className={`rounded-2xl px-3 py-2 text-xs font-semibold ${currentSectorMapUrl ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
@@ -845,7 +903,7 @@ export default function LocalMapAdmin() {
             <div key={store.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3">
               <div className="min-w-0">
                 <p className="truncate font-bold text-slate-900">{store.name}</p>
-                <p className="truncate text-xs text-slate-500">{store.sector || 'Sin sector'} - {store.type || 'negocio'}</p>
+                <p className="truncate text-xs text-slate-500">{store.city || store.commune || 'Sin ciudad'} - {store.sector || 'Sin sector'} - {store.type || 'negocio'}</p>
               </div>
               <span className="shrink-0 text-sm font-black text-blue-600">{formatDistance(store.distance_m)}</span>
             </div>
@@ -861,7 +919,7 @@ export default function LocalMapAdmin() {
           </div>
           <StatusPill>{filteredStores.length}</StatusPill>
         </div>
-        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar por nombre, sector o direccion..." className="mt-3 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm" />
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar por nombre, ciudad, sector o direccion..." className="mt-3 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm" />
         <div className="mt-2 grid grid-cols-3 gap-2">
           <select value={coordFilter} onChange={e => setCoordFilter(e.target.value)} className="rounded-2xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600">
             <option value="all">Todas</option>
@@ -890,7 +948,7 @@ export default function LocalMapAdmin() {
                         {hasCoords(store) ? <StatusPill tone="green">Con coordenadas</StatusPill> : <StatusPill tone="amber">Sin coordenadas validas</StatusPill>}
                         {store.is_verified ? <StatusPill tone="green">Verificado</StatusPill> : <StatusPill>Sin verificar</StatusPill>}
                       </div>
-                      <p className="mt-1 text-xs text-slate-500">{store.sector || 'Sin sector'} - {store.address || 'Sin direccion'} - {store.type || 'negocio'}</p>
+                      <p className="mt-1 text-xs text-slate-500">{[store.city || store.commune || 'Sin ciudad', store.sector || 'Sin sector'].join(' - ')} - {store.address || 'Sin direccion'} - {store.type || 'negocio'}</p>
                       <p className={`mt-1 text-xs ${hasCoords(store) ? 'text-slate-400' : 'font-semibold text-amber-700'}`}>{hasCoords(store) ? `${store.latitude}, ${store.longitude}` : 'Sin coordenadas validas.'}</p>
                     </div>
                     <div className="flex shrink-0 flex-col gap-2">
@@ -915,7 +973,7 @@ export default function LocalMapAdmin() {
           </div>
           <StatusPill>{filteredSectors.length}</StatusPill>
         </div>
-        <input value={sectorQuery} onChange={e => setSectorQuery(e.target.value)} placeholder="Buscar sector o comuna..." className="mt-3 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm" />
+        <input value={sectorQuery} onChange={e => setSectorQuery(e.target.value)} placeholder="Buscar por ciudad, comuna o sector..." className="mt-3 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm" />
         <div className="mt-3 space-y-2">
           {filteredSectors.map(sector => {
             const url = mapsUrl(sector.latitude, sector.longitude)
@@ -927,7 +985,7 @@ export default function LocalMapAdmin() {
                       <p className="font-bold text-slate-900">{sector.name}</p>
                       {hasCoords(sector) ? <StatusPill tone="green">Con coordenadas</StatusPill> : <StatusPill tone="amber">Sin coordenadas validas</StatusPill>}
                     </div>
-                    <p className="mt-1 text-xs text-slate-500">{sector.commune || 'Sin comuna'} - radio {sector.radius_m || 900} m</p>
+                    <p className="mt-1 text-xs text-slate-500">{sectorLabel(sector)} - radio {sector.radius_m || 900} m</p>
                     <p className={`mt-1 text-xs ${hasCoords(sector) ? 'text-slate-400' : 'font-semibold text-amber-700'}`}>{hasCoords(sector) ? `${sector.latitude}, ${sector.longitude}` : 'Advertencia: este sector no tiene coordenadas validas.'}</p>
                   </div>
                   <div className="flex shrink-0 flex-col gap-2">

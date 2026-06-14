@@ -21,10 +21,10 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
 }
 
 function pickZone(properties = {}) {
-  const region = properties.state || properties.region || properties.county || ''
-  const city = properties.city || properties.town || properties.village || properties.municipality || ''
-  const commune = properties.municipality || properties.city || properties.town || properties.county || properties.district || ''
-  const district = properties.suburb || properties.district || properties.neighbourhood || ''
+  const region = properties.state || properties.region || ''
+  const city = properties.city || properties.town || properties.locality || properties.village || ''
+  const commune = properties.municipality || properties.county || properties.city || properties.town || properties.locality || ''
+  const sector = properties.suburb || properties.district || properties.neighbourhood || properties.quarter || ''
 
   return {
     country: properties.country || '',
@@ -33,8 +33,10 @@ function pickZone(properties = {}) {
     city,
     municipality: properties.municipality || '',
     commune,
-    district,
+    sector,
+    district: sector,
     suburb: properties.suburb || '',
+    neighbourhood: properties.neighbourhood || '',
     postcode: properties.postcode || '',
     formatted: properties.formatted || '',
   }

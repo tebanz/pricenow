@@ -21,7 +21,7 @@ export function placeToStore(place, provider = 'map') {
     name: place.name,
     type: mapProviderType(place.type),
     address: place.address || '',
-    sector: place.sector || place.commune || '',
+    sector: place.sector || place.suburb || place.district || place.neighbourhood || '',
     city: place.city || place.commune || '',
     commune: place.commune || place.city || '',
     region: place.region || place.state || '',

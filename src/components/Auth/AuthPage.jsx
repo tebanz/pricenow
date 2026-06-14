@@ -118,8 +118,8 @@ export default function AuthPage() {
             <div className="inline-flex items-center gap-3 rounded-2xl border border-white/15 bg-white/10 px-3 py-2 shadow-sm backdrop-blur">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-lg font-black text-brand-600">₱</div>
               <div>
-                <p className="font-black leading-tight">PriceNow</p>
-                <p className="text-[11px] font-medium text-white/60">PriceNow por KairosNow</p>
+                <p className="font-black leading-tight">EdePrecios</p>
+                <p className="text-[11px] font-medium text-white/60">por EdeHeis</p>
               </div>
             </div>
 
@@ -234,7 +234,7 @@ export default function AuthPage() {
               </div>
 
               <button disabled={loading} className="btn-primary w-full rounded-2xl py-4 text-base shadow-lg shadow-brand-500/20">
-                {loading ? 'Procesando...' : mode === 'login' ? 'Entrar a PriceNow' : 'Crear cuenta'}
+                {loading ? 'Procesando...' : mode === 'login' ? 'Entrar a EdePrecios' : 'Crear cuenta'}
               </button>
             </div>
 
@@ -244,7 +244,7 @@ export default function AuthPage() {
                 <StepDot active={mode === 'register'} />
                 <StepDot />
               </div>
-              <p className="text-sm font-bold text-slate-800">PriceNow funciona mejor con datos reales.</p>
+              <p className="text-sm font-bold text-slate-800">EdePrecios funciona mejor con datos reales.</p>
               <p className="mt-1 text-xs leading-relaxed text-slate-500">
                 Tus reportes pasan por validación. Al aprobarse, suman puntos y ayudan a comparar precios por sector.
               </p>

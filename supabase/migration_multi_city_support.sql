@@ -10,9 +10,9 @@ ALTER TABLE public.stores
 
 UPDATE public.stores
 SET
-  commune = COALESCE(NULLIF(commune, ''), NULLIF(sector, '')),
+  city = COALESCE(NULLIF(city, ''), NULLIF(commune, '')),
   store_type = COALESCE(NULLIF(store_type, ''), NULLIF(type, ''))
-WHERE commune IS NULL OR commune = '' OR store_type IS NULL OR store_type = '';
+WHERE city IS NULL OR city = '' OR store_type IS NULL OR store_type = '';
 
 ALTER TABLE public.price_entries
   ADD COLUMN IF NOT EXISTS city TEXT,
@@ -20,8 +20,8 @@ ALTER TABLE public.price_entries
   ADD COLUMN IF NOT EXISTS region TEXT;
 
 UPDATE public.price_entries
-SET commune = COALESCE(NULLIF(commune, ''), NULLIF(sector, ''))
-WHERE commune IS NULL OR commune = '';
+SET city = COALESCE(NULLIF(city, ''), NULLIF(commune, ''))
+WHERE city IS NULL OR city = '';
 
 ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS preferred_commune TEXT,

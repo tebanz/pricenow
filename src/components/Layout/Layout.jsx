@@ -7,7 +7,7 @@ import { getStoredZone, PRICE_NOW_ZONE_EVENT, zoneDisplayName } from '../../util
 function BrandMark() {
   return (
     <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-white/15 shadow-inner ring-1 ring-white/20">
-      <div className="flex h-6 w-6 items-center justify-center rounded-xl bg-white text-sm font-black text-blue-700">P</div>
+      <div className="flex h-6 w-6 items-center justify-center rounded-xl bg-white text-sm font-black text-blue-700">E</div>
     </div>
   )
 }
@@ -35,9 +35,9 @@ export default function Layout() {
           <div className="flex min-w-0 items-center gap-3">
             <BrandMark />
             <div className="min-w-0">
-              <span className="block truncate text-lg font-black leading-none tracking-tight">PriceNow</span>
+              <span className="block truncate text-lg font-black leading-none tracking-tight">EdePrecios</span>
               <p className="text-[11px] font-semibold leading-none text-white/70">
-                PriceNow por KairosNow{zone ? ` · ${zoneDisplayName(zone)}` : ''}
+                por EdeHeis{zone ? ` - ${zoneDisplayName(zone)}` : ''}
               </p>
             </div>
           </div>

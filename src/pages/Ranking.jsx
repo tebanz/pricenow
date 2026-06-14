@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import Report from './Report'
 import { supabase } from '../lib/supabase'
 import { calcUnitPrice, formatCLP, formatUnitPrice } from '../utils/priceCalc'
-import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowCommune, sameCommune, zoneSubtitle } from '../utils/location'
+import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowCity, rowCommune, rowMatchesCity, rowMatchesSector, rowSector, zoneCity, zoneSector, zoneSubtitle } from '../utils/location'
 import { effectivePrice, hasOffer, paymentConditionLabel } from '../utils/discounts'
 import Spinner from '../components/UI/Spinner'
 
@@ -96,9 +96,13 @@ function rowDistanceFromZone(row, zone) {
 
 function filterRowsByZone(rows, zoneMode, zone) {
   if (zoneMode === 'all') return rows
-  if (zoneMode === 'commune') {
-    if (!zone?.commune) return rows
-    return rows.filter(row => sameCommune(rowCommune(row), zone.commune))
+  if (zoneMode === 'city' || zoneMode === 'commune') {
+    if (!zoneCity(zone)) return rows
+    return rows.filter(row => rowMatchesCity(row, zone))
+  }
+  if (zoneMode === 'sector') {
+    if (!zoneSector(zone)) return rows
+    return rows.filter(row => rowMatchesSector(row, zone))
   }
   if (zoneMode === 'nearby') {
     if (!isValidCoordinate(zone?.lat, zone?.lng)) return rows
@@ -112,8 +116,10 @@ function filterRowsByZone(rows, zoneMode, zone) {
 
 function zoneFilterLabel(zoneMode, zone) {
   if (zoneMode === 'nearby') return 'Cerca de mi'
-  if (zoneMode === 'commune' && zone?.commune) return zoneSubtitle(zone)
-  if (zoneMode === 'commune') return 'Mi comuna'
+  if ((zoneMode === 'city' || zoneMode === 'commune') && zoneCity(zone)) return zoneCity(zone)
+  if (zoneMode === 'city' || zoneMode === 'commune') return 'Mi ciudad'
+  if (zoneMode === 'sector' && zoneSector(zone)) return zoneSubtitle(zone)
+  if (zoneMode === 'sector') return 'Mi sector'
   return 'Todas las zonas'
 }
 
@@ -151,7 +157,7 @@ function buildRanking(rows, searchTerm) {
       return
     }
 
-    const storeZone = rowCommune(row) || 'Sin comuna'
+    const storeZone = [rowCity(row) || rowCommune(row), rowSector(row)].filter(Boolean).join(' - ') || 'Sin zona'
     const storeKey = `${normalizeText(row.store_name)}__${storeZone}`
     if (!groups[groupKey].stores[storeKey]) {
       groups[groupKey].stores[storeKey] = {
@@ -215,7 +221,7 @@ export default function Ranking() {
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTab = searchParams.get('tab') === 'reportes' ? 'reportes' : 'ranking'
   const [query, setQuery] = useState('')
-  const [zoneMode, setZoneMode] = useState(() => getStoredZone()?.commune ? 'commune' : 'all')
+  const [zoneMode, setZoneMode] = useState(() => zoneCity(getStoredZone()) ? 'city' : 'all')
   const [currentZone, setCurrentZone] = useState(() => getStoredZone())
   const [period, setPeriod] = useState('30d')
   const [rows, setRows] = useState([])
@@ -275,12 +281,12 @@ export default function Ranking() {
     setRows(nextRows)
     setResults(buildRanking(nextRows, query))
     setLoading(false)
-  }, [period, zoneMode, currentZone?.commune, currentZone?.lat, currentZone?.lng, query])
+  }, [period, zoneMode, currentZone?.city, currentZone?.commune, currentZone?.sector, currentZone?.suburb, currentZone?.district, currentZone?.lat, currentZone?.lng, query])
 
   useEffect(() => {
     loadRows()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period, zoneMode, currentZone?.commune, currentZone?.lat, currentZone?.lng])
+  }, [period, zoneMode, currentZone?.city, currentZone?.commune, currentZone?.sector, currentZone?.suburb, currentZone?.district, currentZone?.lat, currentZone?.lng])
 
   function handleSearch(e) {
     e.preventDefault()
@@ -338,11 +344,15 @@ export default function Ranking() {
         </div>
 
         <div className="grid grid-cols-2 gap-2">
-          <select value={zoneMode} onChange={e => setZoneMode(e.target.value)} className="input-field">
-            <option value="nearby">Cerca de mi</option>
-            <option value="commune">Mi comuna</option>
-            <option value="all">Todas las zonas</option>
-          </select>
+          <label className="grid gap-1 text-[11px] font-black uppercase tracking-wide text-slate-400">
+            Buscar precios en
+            <select value={zoneMode} onChange={e => setZoneMode(e.target.value)} className="input-field normal-case tracking-normal">
+              <option value="nearby">Cerca de mi</option>
+              <option value="city">Mi ciudad</option>
+              {zoneSector(currentZone) && <option value="sector">Mi sector</option>}
+              <option value="all">Todas las zonas</option>
+            </select>
+          </label>
 
           <select value={period} onChange={e => setPeriod(e.target.value)} className="input-field">
             <option value="30d">Últimos 30 días</option>

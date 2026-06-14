@@ -12,8 +12,10 @@ import {
   reverseGeocode,
   sameCommune,
   setStoredZone,
+  zoneCity,
   zoneCommune,
   zoneDisplayName,
+  zoneSector,
   zoneSubtitle,
 } from '../utils/location'
 import { normalizeName } from '../utils/normalize'
@@ -61,7 +63,7 @@ export default function Home() {
   const [sectors, setSectors] = useState([])
   const [stats, setStats] = useState({ today: 0, points: 0 })
   const [zone, setZone] = useState(() => getStoredZone())
-  const [manualZone, setManualZone] = useState(() => ({ region: getStoredZone()?.region || '', commune: getStoredZone()?.commune || '' }))
+  const [manualZone, setManualZone] = useState(() => ({ region: getStoredZone()?.region || '', city: zoneCity(getStoredZone()) || '', commune: getStoredZone()?.commune || '', sector: zoneSector(getStoredZone()) || '' }))
   const [zoneSaving, setZoneSaving] = useState(false)
   const [zonePrompt, setZonePrompt] = useState(null)
   const [zoneChooserOpen, setZoneChooserOpen] = useState(false)
@@ -80,7 +82,7 @@ export default function Home() {
         .limit(600),
       supabase
         .from('local_sectors')
-        .select('id, commune, name, latitude, longitude, radius_m')
+        .select('id, city, commune, region, name, latitude, longitude, radius_m')
         .eq('is_active', true)
         .limit(300),
       supabase
@@ -121,7 +123,7 @@ export default function Home() {
       confirmed: true,
     })
     setZone(saved)
-    setManualZone({ region: saved?.region || '', commune: saved?.commune || '' })
+    setManualZone({ region: saved?.region || '', city: zoneCity(saved) || '', commune: saved?.commune || '', sector: zoneSector(saved) || '' })
   }, [profile, zone])
 
   async function fetchProviderNearby(origin, provider, radius) {
@@ -180,14 +182,16 @@ export default function Home() {
       confirmed: true,
     })
     setZone(saved)
-    setManualZone({ region: saved?.region || '', commune: saved?.commune || '' })
+    setManualZone({ region: saved?.region || '', city: zoneCity(saved) || '', commune: saved?.commune || '', sector: zoneSector(saved) || '' })
 
-    if (!user?.id || !saved?.commune) return saved
+    const preferredCity = zoneCity(saved)
+    const preferredCommune = saved.commune || preferredCity
+    if (!user?.id || !preferredCity) return saved
     setZoneSaving(true)
     const payload = {
-      preferred_commune: saved.commune,
+      preferred_commune: preferredCommune,
       preferred_region: saved.region || saved.state || null,
-      preferred_city: saved.city || saved.commune || null,
+      preferred_city: saved.city || preferredCommune || null,
       preferred_latitude: saved.lat || null,
       preferred_longitude: saved.lng || null,
       updated_at: new Date().toISOString(),
@@ -215,12 +219,15 @@ export default function Home() {
 
   async function chooseManualZone(event) {
     event.preventDefault()
-    if (!manualZone.commune.trim()) return
+    if (!manualZone.city.trim() && !manualZone.commune.trim()) return
+    const manualCity = manualZone.city.trim() || manualZone.commune.trim()
+    const manualCommune = manualZone.commune.trim() || manualCity
     const saved = await savePreferredZone({
       country: 'Chile',
       region: manualZone.region.trim(),
-      city: manualZone.commune.trim(),
-      commune: manualZone.commune.trim(),
+      city: manualCity,
+      commune: manualCommune,
+      sector: manualZone.sector.trim(),
       source: 'manual',
       preference_source: 'manual',
     }, { source: 'manual', preferenceSource: 'manual' })
@@ -230,7 +237,7 @@ export default function Home() {
   }
 
   async function handleDetectedZone(detectedZone, nextPosition) {
-    if (!detectedZone || !zoneCommune(detectedZone)) {
+    if (!detectedZone || !zoneCity(detectedZone)) {
       setLocalMessage({ type: 'warning', text: 'No pudimos detectar tu comuna. Mantuvimos tu zona actual.' })
       return
     }
@@ -248,8 +255,8 @@ export default function Home() {
 
     if (
       isManualPreferredZone(currentZone) &&
-      zoneCommune(currentZone) &&
-      !sameCommune(zoneCommune(currentZone), zoneCommune(detected))
+      zoneCity(currentZone) &&
+      !sameCommune(zoneCity(currentZone), zoneCity(detected))
     ) {
       setLocalMessage(null)
       setZonePrompt({
@@ -342,7 +349,7 @@ export default function Home() {
 
   async function saveOsmStore(store) {
     if (isDuplicatePlace(store, stores)) {
-      setLocalMessage({ type: 'error', text: 'Ese negocio parece estar duplicado en PriceNow.' })
+      setLocalMessage({ type: 'error', text: 'Ese negocio parece estar duplicado en EdePrecios.' })
       return
     }
 
@@ -354,10 +361,10 @@ export default function Home() {
       chain: null,
       type: store.type || 'negocio',
       store_type: store.type || 'negocio',
-      sector: store.sector || 'Sin sector',
+      sector: store.sector || null,
       sector_id: null,
-      city: store.city || store.commune || null,
-      commune: store.commune || store.sector || null,
+      city: store.city || zoneCity(zone) || store.commune || null,
+      commune: store.commune || zoneCommune(zone) || store.city || null,
       region: store.region || null,
       address: store.address || null,
       latitude: Number(store.latitude),
@@ -383,7 +390,7 @@ export default function Home() {
       return
     }
 
-    setLocalMessage({ type: 'ok', text: `${store.name} guardado en PriceNow.` })
+    setLocalMessage({ type: 'ok', text: `${store.name} guardado en EdePrecios.` })
     setOsmStores(prev => prev.filter(item => item.id !== store.id))
     await load()
   }
@@ -393,7 +400,7 @@ export default function Home() {
     return stores
       .map(store => ({
         ...store,
-        source_label: 'Verificado PriceNow',
+        source_label: 'Verificado EdePrecios',
         source_kind: 'pricenow',
         distance_m: getDistanceMeters(position.lat, position.lng, store.latitude, store.longitude),
       }))
@@ -484,9 +491,9 @@ export default function Home() {
             Ubicacion activada{position?.accuracy ? `, precision aprox. ${position.accuracy} m` : ''}.
           </p>
         )}
-        {zone?.commune && (
+        {zoneCity(zone) && (
           <p className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
-            Estas en {zoneSubtitle(zone)}.
+            {zoneCity(zone)}{zoneSector(zone) ? ` · Sector ${zoneSector(zone)}` : ''}.
           </p>
         )}
         {localMessage && <p className={`mt-3 rounded-2xl px-3 py-2 text-sm font-semibold ${localMessageClass}`}>{localMessage.text}</p>}
@@ -499,7 +506,7 @@ export default function Home() {
             </div>
           </div>
         )}
-        {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicacion. Puedes seguir usando PriceNow sin compartirla.</p>}
+        {locationStatus === 'error' && <p className="mt-3 text-sm font-bold text-red-600">No se pudo obtener ubicacion. Puedes seguir usando EdePrecios sin compartirla.</p>}
         {sectorDetection?.type === 'ok' && <p className="mt-3 rounded-2xl bg-blue-50 px-3 py-2 text-sm text-blue-700">Sector probable: <b>{sectorDetection.name}</b>.</p>}
         {sectorDetection?.type === 'warning' && <p className="mt-3 rounded-2xl bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">{sectorDetection.text}</p>}
 
@@ -513,10 +520,12 @@ export default function Home() {
           <summary className="cursor-pointer text-sm font-black text-slate-800">Cambiar zona</summary>
           <form onSubmit={chooseManualZone} className="mt-3 grid gap-2">
             <input value={manualZone.region} onChange={e => setManualZone({ ...manualZone, region: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Region, ej: Metropolitana" />
-            <input value={manualZone.commune} onChange={e => setManualZone({ ...manualZone, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna, ej: Providencia" />
+            <input value={manualZone.city} onChange={e => setManualZone({ ...manualZone, city: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Ciudad, ej: Rancagua" />
+            <input value={manualZone.commune} onChange={e => setManualZone({ ...manualZone, commune: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Comuna, ej: Rancagua" />
+            <input value={manualZone.sector} onChange={e => setManualZone({ ...manualZone, sector: e.target.value })} className="rounded-2xl border border-slate-200 px-3 py-3 text-sm" placeholder="Sector opcional, ej: Manzanal" />
             <div className="grid grid-cols-2 gap-2">
               <button type="button" onClick={askLocation} disabled={locationStatus === 'loading'} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-black text-white disabled:opacity-50">Usar mi ubicacion actual</button>
-              <button disabled={zoneSaving || !manualZone.commune.trim()} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{zoneSaving ? 'Guardando...' : 'Elegir comuna manualmente'}</button>
+              <button disabled={zoneSaving || (!manualZone.city.trim() && !manualZone.commune.trim())} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{zoneSaving ? 'Guardando...' : 'Elegir zona manualmente'}</button>
             </div>
           </form>
         </details>
@@ -551,7 +560,7 @@ export default function Home() {
                       disabled={savingOsmId === store.id}
                       className="shrink-0 rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white disabled:opacity-50"
                     >
-                      {savingOsmId === store.id ? 'Guardando...' : 'Guardar en PriceNow'}
+                      {savingOsmId === store.id ? 'Guardando...' : 'Guardar en EdePrecios'}
                     </button>
                   )}
                 </div>
@@ -580,15 +589,15 @@ export default function Home() {
       <section className="mx-4 rounded-[1.5rem] border border-blue-100 bg-white p-4 shadow-sm">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">Parte de KairosNow</p>
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-blue-500">EdeHeis</p>
             <p className="mt-1 text-sm text-slate-600">Herramientas para precios, negocios, finanzas y comunidad local.</p>
           </div>
-          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">PriceNow activo</span>
+          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">EdePrecios activo</span>
         </div>
         <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs font-black">
-          <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">PriceNow<br /><span className="font-semibold">Activo</span></div>
-          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">LedgerNow<br /><span className="font-semibold">Proximamente</span></div>
-          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">WalleNow<br /><span className="font-semibold">Proximamente</span></div>
+          <div className="rounded-2xl bg-blue-50 p-3 text-blue-700">EdePrecios<br /><span className="font-semibold">Activo</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">EdeFlujos<br /><span className="font-semibold">Proximamente</span></div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-slate-500">EdeRinde<br /><span className="font-semibold">Proximamente</span></div>
         </div>
       </section>
     </div>

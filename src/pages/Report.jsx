@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { calcUnitPrice, formatUnitPrice, priceChangeDisplay } from '../utils/priceCalc'
-import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowCommune, sameCommune, zoneSubtitle } from '../utils/location'
+import { getDistanceMeters, getStoredZone, isValidCoordinate, PRICE_NOW_ZONE_EVENT, rowMatchesCity, rowMatchesSector, zoneCity, zoneSector, zoneSubtitle } from '../utils/location'
 import { effectivePrice, hasOffer, paymentConditionLabel } from '../utils/discounts'
 import Spinner from '../components/UI/Spinner'
 import { format, startOfWeek, endOfWeek, subWeeks, subDays } from 'date-fns'
@@ -26,9 +26,13 @@ function rowDistanceFromZone(row, zone) {
 
 function filterRowsByZone(rows, zoneMode, zone) {
   if (zoneMode === 'all') return rows
-  if (zoneMode === 'commune') {
-    if (!zone?.commune) return rows
-    return rows.filter(row => sameCommune(rowCommune(row), zone.commune))
+  if (zoneMode === 'city' || zoneMode === 'commune') {
+    if (!zoneCity(zone)) return rows
+    return rows.filter(row => rowMatchesCity(row, zone))
+  }
+  if (zoneMode === 'sector') {
+    if (!zoneSector(zone)) return rows
+    return rows.filter(row => rowMatchesSector(row, zone))
   }
   if (zoneMode === 'nearby') {
     if (!isValidCoordinate(zone?.lat, zone?.lng)) return rows
@@ -42,8 +46,10 @@ function filterRowsByZone(rows, zoneMode, zone) {
 
 function zoneFilterLabel(zoneMode, zone) {
   if (zoneMode === 'nearby') return 'Cerca de mi'
-  if (zoneMode === 'commune' && zone?.commune) return zoneSubtitle(zone)
-  if (zoneMode === 'commune') return 'Mi comuna'
+  if ((zoneMode === 'city' || zoneMode === 'commune') && zoneCity(zone)) return zoneCity(zone)
+  if (zoneMode === 'city' || zoneMode === 'commune') return 'Mi ciudad'
+  if (zoneMode === 'sector' && zoneSector(zone)) return zoneSubtitle(zone)
+  if (zoneMode === 'sector') return 'Mi sector'
   return 'Todas las zonas'
 }
 
@@ -229,7 +235,7 @@ export default function Report() {
   const [periodMode, setPeriodMode] = useState('30d')
   const [weekOffset, setWeekOffset] = useState(0)
   const [search, setSearch] = useState('')
-  const [zoneMode, setZoneMode] = useState(() => getStoredZone()?.commune ? 'commune' : 'all')
+  const [zoneMode, setZoneMode] = useState(() => zoneCity(getStoredZone()) ? 'city' : 'all')
   const [currentZone, setCurrentZone] = useState(() => getStoredZone())
 
   const range = getRange(periodMode, weekOffset)
@@ -291,7 +297,7 @@ export default function Report() {
   useEffect(() => {
     loadLiveReport()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [periodMode, weekOffset, zoneMode, currentZone?.commune, currentZone?.lat, currentZone?.lng])
+  }, [periodMode, weekOffset, zoneMode, currentZone?.city, currentZone?.commune, currentZone?.sector, currentZone?.suburb, currentZone?.district, currentZone?.lat, currentZone?.lng])
 
   const filteredRows = reportRows.filter(row => {
     const term = normalizeText(search)
@@ -351,11 +357,15 @@ export default function Report() {
       )}
 
       <div className="mb-4 rounded-xl border border-slate-200 bg-white p-3">
-        <select value={zoneMode} onChange={e => setZoneMode(e.target.value)} className="input-field">
-          <option value="nearby">Cerca de mi</option>
-          <option value="commune">Mi comuna</option>
-          <option value="all">Todas las zonas</option>
-        </select>
+        <label className="grid gap-1 text-[11px] font-black uppercase tracking-wide text-slate-400">
+          Buscar precios en
+          <select value={zoneMode} onChange={e => setZoneMode(e.target.value)} className="input-field normal-case tracking-normal">
+            <option value="nearby">Cerca de mi</option>
+            <option value="city">Mi ciudad</option>
+            {zoneSector(currentZone) && <option value="sector">Mi sector</option>}
+            <option value="all">Todas las zonas</option>
+          </select>
+        </label>
         <p className="mt-2 text-xs font-semibold text-slate-400">Zona: {zoneFilterLabel(zoneMode, currentZone)}</p>
       </div>
 

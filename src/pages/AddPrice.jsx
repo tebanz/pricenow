@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import {
   calcUnitPrice, formatCLP, formatUnitPrice, UNIDADES
 } from '../utils/priceCalc'
-import { getStoredZone, isManualPreferredZone, reverseGeocode, sameCommune, setStoredZone, zoneCommune, zoneSubtitle } from '../utils/location'
+import { getStoredZone, isManualPreferredZone, reverseGeocode, sameCommune, setStoredZone, zoneCity, zoneCommune, zoneSector, zoneSubtitle } from '../utils/location'
 import { calculateDiscountFinalPrice, DISCOUNT_TYPES, PAYMENT_METHODS, paymentMethodLabel } from '../utils/discounts'
 import { parseReceiptOcr, RECEIPT_TYPES } from '../utils/receiptParser'
 
@@ -307,7 +307,7 @@ function normalizePriceNowPlace(row, origin) {
   return {
     id: `pricenow-${normalizeText(row.store_name)}-${row.sector || 'sin-sector'}-${position.lat}-${position.lng}`,
     name: row.store_name,
-    type: 'reportado en PriceNow',
+    type: 'reportado en EdePrecios',
     address: row.sector || '',
     sector: row.sector || '',
     lat: Number(position.lat.toFixed(7)),
@@ -345,7 +345,7 @@ function normalizeKnownStorePlace(store, origin, includeWithoutDistance = false)
 }
 
 function sourceLabel(source) {
-  if (source === 'pricenow_reports') return 'PriceNow'
+  if (source === 'pricenow_reports') return 'EdePrecios'
   if (source === 'pricenow_known_store') return 'Tienda conocida'
   if (source && source.includes('openstreetmap')) return 'OpenStreetMap'
   return 'Referencia'
@@ -578,9 +578,16 @@ export default function AddPrice() {
     .slice(0, 80)
 
   const availableSectors = Array.from(new Set([
-    locationZone?.commune,
-    locationZone?.city,
-    ...stores.map(store => store.commune || store.sector).filter(Boolean),
+    zoneSector(locationZone),
+    ...stores
+      .filter(store => {
+        if (!zoneCity(locationZone)) return true
+        const storeCity = store.city || store.commune || ''
+        const storeCommune = store.commune || store.city || ''
+        return sameCommune(storeCity, zoneCity(locationZone)) || sameCommune(storeCommune, zoneCommune(locationZone))
+      })
+      .map(store => store.sector)
+      .filter(Boolean),
   ].filter(Boolean))).sort((a, b) => a.localeCompare(b, 'es'))
   const includedReceiptItems = receiptMeta.receipt_type === RECEIPT_TYPES.ITEMIZED
     ? receiptItems.filter(item => item.include_in_report && !item.discarded)
@@ -721,10 +728,10 @@ export default function AddPrice() {
             if (zone) {
               const detectedZone = { ...zone, lat: nextLocation.lat, lng: nextLocation.lng, source: 'gps', preference_source: 'gps', is_preferred: true, confirmed: true }
               const currentZone = getStoredZone()
-              const keepManualZone = isManualPreferredZone(currentZone) && zoneCommune(currentZone) && !sameCommune(zoneCommune(currentZone), zoneCommune(detectedZone))
+              const keepManualZone = isManualPreferredZone(currentZone) && zoneCity(currentZone) && !sameCommune(zoneCity(currentZone), zoneCity(detectedZone))
               const savedZone = keepManualZone ? detectedZone : setStoredZone(detectedZone)
               setLocationZone(savedZone)
-              setForm(prev => prev.sector ? prev : { ...prev, sector: savedZone?.commune || savedZone?.city || '' })
+              setForm(prev => prev.sector ? prev : { ...prev, sector: zoneSector(savedZone) || '' })
             }
           })
           .catch(err => console.warn('PriceNow reverse geocode for report failed:', err))
@@ -925,7 +932,6 @@ export default function AddPrice() {
       if (invalidItem) return 'Revisa las líneas incluidas: producto, cantidad y precio final son obligatorios.'
     }
     if (!form.store_name.trim()) return 'La tienda es obligatoria.'
-    if (!form.sector) return 'El sector es obligatorio.'
     if (!form.purchase_date) return 'La fecha de compra es obligatoria.'
     return null
   }
@@ -936,6 +942,7 @@ export default function AddPrice() {
     const optionalColumns = [
       'city',
       'commune',
+      'sector',
       'region',
       'has_discount',
       'normal_price',
@@ -1061,6 +1068,9 @@ export default function AddPrice() {
       const receipt_photo_url = await uploadReceiptPhoto()
       const receiptId = await createReceiptRecord(receipt_photo_url)
       const zone = locationZone || getStoredZone()
+      const reportCity = zoneCity(zone) || zoneCommune(zone) || null
+      const reportCommune = zoneCommune(zone) || reportCity
+      const reportSector = form.sector.trim() || zoneSector(zone) || null
       const useReceiptItems = photo && receiptReviewConfirmed && includedReceiptItems.length > 0
       const selectedReceiptItems = useReceiptItems ? includedReceiptItems : []
       const receiptItemIdMap = await createReceiptItems(receiptId, selectedReceiptItems)
@@ -1101,9 +1111,9 @@ export default function AddPrice() {
             baes_eligibility_status: form.payment_method === 'junaeb_baes' ? 'eligible' : form.baes_eligibility_status || null,
             store_name: form.store_name.trim(),
             store_id: form._store_id ?? null,
-            sector: form.sector,
-            city: zone?.city || zone?.commune || null,
-            commune: zone?.commune || null,
+            sector: reportSector,
+            city: reportCity,
+            commune: reportCommune,
             region: zone?.region || zone?.state || null,
             purchase_date: form.purchase_date,
             notes: form.notes.trim() || null,
@@ -1149,9 +1159,9 @@ export default function AddPrice() {
           baes_eligibility_status: form.payment_method === 'junaeb_baes' ? 'eligible' : form.baes_eligibility_status || null,
           store_name: form.store_name.trim(),
           store_id: form._store_id ?? null,
-          sector: form.sector,
-          city: zone?.city || zone?.commune || null,
-          commune: zone?.commune || null,
+          sector: reportSector,
+          city: reportCity,
+          commune: reportCommune,
           region: zone?.region || zone?.state || null,
           purchase_date: form.purchase_date,
           notes: form.notes.trim() || null,
@@ -1257,7 +1267,7 @@ export default function AddPrice() {
             <div className="mt-2 bg-white border border-slate-200 rounded-xl p-3">
               <div className="flex items-center justify-between gap-3 mb-2">
                 <div>
-                  <p className="text-xs font-semibold text-slate-700">Catálogo PriceNow</p>
+                  <p className="text-xs font-semibold text-slate-700">Catalogo EdePrecios</p>
                   <p className="text-[11px] text-slate-400">Selecciona un producto estándar o escribe uno nuevo.</p>
                 </div>
                 <span className="text-[11px] text-slate-400 whitespace-nowrap">{products.length} productos</span>
@@ -1290,7 +1300,7 @@ export default function AddPrice() {
                 </div>
               ) : (
                 <p className="text-xs text-slate-500 bg-slate-50 rounded-lg p-3">
-                  No hay productos con ese filtro. Puedes escribir el nombre manualmente y PriceNow lo creará como producto estandarizado.
+                  No hay productos con ese filtro. Puedes escribir el nombre manualmente y EdePrecios lo creara como producto estandarizado.
                 </p>
               )}
             </div>
@@ -1310,7 +1320,7 @@ export default function AddPrice() {
                 ))}
               </select>
               <p className="text-[11px] text-slate-400 mt-1">
-                Si el producto no existe, PriceNow lo creará como producto estandarizado para que los reportes puedan promediarlo.
+                Si el producto no existe, EdePrecios lo creara como producto estandarizado para que los reportes puedan promediarlo.
               </p>
             </div>
           )}
@@ -1492,19 +1502,19 @@ export default function AddPrice() {
         )}
 
         <div>
-          <label className="input-label">Comuna / sector <span className="text-danger-500">*</span></label>
+          <label className="input-label">Sector <span className="text-slate-400 font-normal">(opcional)</span></label>
           <input
             name="sector"
             list="pricenow-zones"
             value={form.sector}
             onChange={handleChange}
             className="input-field"
-            placeholder="Ej: Providencia, Santiago, Rancagua"
+            placeholder="Ej: Manzanal, Centro, El Tenis"
           />
           <datalist id="pricenow-zones">
             {availableSectors.map(s => <option key={s} value={s} />)}
           </datalist>
-          {locationZone?.commune && <p className="mt-1 text-xs font-semibold text-brand-600">Zona detectada: {zoneSubtitle(locationZone)}</p>}
+          {zoneCity(locationZone) && <p className="mt-1 text-xs font-semibold text-brand-600">Zona detectada: {zoneSubtitle(locationZone)}</p>}
         </div>
 
         <div>
@@ -1514,7 +1524,7 @@ export default function AddPrice() {
               <div className="space-y-2">
                 <p className="text-sm font-semibold text-slate-800">Ubicación guardada</p>
                 <p className="text-xs text-slate-500">
-                  Lat: {location.lat} · Lng: {location.lng} · precisión aprox. {location.accuracy} m
+                  Usaremos esta ubicacion para calcular cercania. Precision aprox. {location.accuracy} m
                 </p>
                 <div className="flex gap-2">
                   <a
@@ -1540,7 +1550,7 @@ export default function AddPrice() {
                 </button>
 
                 <p className="text-[11px] text-slate-400">
-                  Primero se revisan reportes y tiendas con coordenadas en PriceNow; luego se consulta OpenStreetMap como apoyo. Si falta un local, escríbelo manualmente junto con tu ubicación exacta para que PriceNow lo aprenda en próximas búsquedas.
+                  Primero se revisan reportes y tiendas con coordenadas en EdePrecios; luego se consulta OpenStreetMap como apoyo. Si falta un local, escribelo manualmente junto con tu ubicacion exacta para que EdePrecios lo aprenda en proximas busquedas.
                 </p>
 
                 {osmPlaces.length > 0 && (
@@ -1567,7 +1577,7 @@ export default function AddPrice() {
 
                 {osmSearched && !osmLoading && osmPlaces.length === 0 && (
                   <p className="text-xs text-slate-500">
-                    No se encontraron negocios cercanos con coordenadas para esta ubicación. Puedes escribir la tienda manualmente y guardar el precio con ubicación exacta; después de aprobarse, PriceNow podrá usarla como referencia cercana.
+                    No se encontraron negocios cercanos con coordenadas para esta ubicacion. Puedes escribir la tienda manualmente y guardar el precio con ubicacion exacta; despues de aprobarse, EdePrecios podra usarla como referencia cercana.
                   </p>
                 )}
               </div>
@@ -1696,7 +1706,7 @@ export default function AddPrice() {
                 {receiptProcessing ? 'Procesando boleta...' : receiptItems.length || receiptOcrText ? 'Procesar boleta nuevamente' : 'Procesar boleta'}
               </button>
               <p className="text-xs text-slate-400">
-                PriceNow usa OCR local con Tesseract.js. No guardes códigos de autorización, cuentas ni números completos de tarjetas.
+                EdePrecios usa OCR local con Tesseract.js. No guardes codigos de autorizacion, cuentas ni numeros completos de tarjetas.
               </p>
             </div>
           )}
