@@ -13,6 +13,8 @@ import BusinessPartners from './pages/BusinessPartners'
 import FavoritesAlerts from './pages/FavoritesAlerts'
 import LocalMapAdmin from './pages/LocalMapAdmin'
 import Benefits from './pages/Benefits'
+import SupermarketsAdmin from './pages/SupermarketsAdmin'
+import WebPricesAdmin from './pages/WebPricesAdmin'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -26,6 +28,14 @@ function ValidatorRoute({ children }) {
   if (loading) return <Spinner fullscreen />
   if (!user) return <Navigate to="/auth" replace />
   if (!isValidator) return <Navigate to="/" replace />
+  return children
+}
+
+function AdminRoute({ children }) {
+  const { user, isAdmin, loading } = useAuth()
+  if (loading) return <Spinner fullscreen />
+  if (!user) return <Navigate to="/auth" replace />
+  if (!isAdmin) return <Navigate to="/" replace />
   return children
 }
 
@@ -48,6 +58,8 @@ export default function App() {
         <Route path="quality" element={<ValidatorRoute><DataQuality /></ValidatorRoute>} />
         <Route path="partners" element={<ValidatorRoute><BusinessPartners /></ValidatorRoute>} />
         <Route path="local-map" element={<ValidatorRoute><LocalMapAdmin /></ValidatorRoute>} />
+        <Route path="supermarkets-admin" element={<AdminRoute><SupermarketsAdmin /></AdminRoute>} />
+        <Route path="web-prices-admin" element={<AdminRoute><WebPricesAdmin /></AdminRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

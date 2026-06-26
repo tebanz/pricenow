@@ -4,6 +4,19 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
 
 const UNITS = ['unidad', 'kg', 'g', 'litro', 'ml', 'metro', 'par', 'caja']
+const SUPERMARKET_CHAINS = [
+  'Lider',
+  'Express de Lider',
+  'Jumbo',
+  'Santa Isabel',
+  'Unimarc',
+  'Tottus',
+  'Mayorista 10',
+  'Acuenta',
+  'Alvi',
+  'Cugat',
+  'Ekono',
+]
 const LOCATION_FIELDS = [
   ['region', 'Region'],
   ['city', 'Ciudad'],
@@ -45,6 +58,18 @@ function hasCoords(row) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false
   if (lat === 0 && lng === 0) return false
   return Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+}
+
+function distanceMeters(a, b) {
+  if (!hasCoords(a) || !hasCoords(b)) return null
+  const R = 6371000
+  const toRad = value => Number(value) * Math.PI / 180
+  const dLat = toRad(Number(b.latitude) - Number(a.latitude))
+  const dLng = toRad(Number(b.longitude) - Number(a.longitude))
+  const lat1 = toRad(a.latitude)
+  const lat2 = toRad(b.latitude)
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
+  return Math.round(2 * R * Math.asin(Math.sqrt(h)))
 }
 
 function Field({ label, children }) {
@@ -104,6 +129,51 @@ function storeIssues(store, usageCount = 0) {
   if (!store.is_verified) issues.push('sin verificar')
   if (usageCount <= 1) issues.push('pocos reportes')
   return issues
+}
+
+function isSupermarketStore(store = {}) {
+  const text = normalize(`${store.type || ''} ${store.store_type || ''} ${store.name || ''} ${store.chain_name || ''} ${store.chain || ''}`)
+  return text.includes('supermercado') || SUPERMARKET_CHAINS.some(chain => text.includes(normalize(chain)))
+}
+
+function supermarketIssues(store) {
+  const issues = []
+  if (!hasCoords(store)) issues.push('sin coordenadas')
+  if (!store.chain_name && !store.chain) issues.push('sin cadena')
+  if (!store.region || !store.city || !store.commune) issues.push('ubicacion incompleta')
+  if (!store.verification_status || store.verification_status === 'pending' || store.is_verified === false) issues.push('pendiente')
+  return issues
+}
+
+function supermarketDuplicateReason(left, right) {
+  const leftExternal = String(left.external_id || left.place_id || '')
+  const rightExternal = String(right.external_id || right.place_id || '')
+  const sameExternal = leftExternal && rightExternal && leftExternal === rightExternal
+  const sameSource = !left.external_source || !right.external_source || left.external_source === right.external_source
+  if (sameExternal && sameSource) return 'Mismo external_id/place_id'
+
+  const leftAddress = normalize(left.address)
+  const rightAddress = normalize(right.address)
+  const sameAddress = leftAddress && rightAddress && leftAddress === rightAddress && normalize(left.commune) === normalize(right.commune)
+  if (sameAddress) return 'Misma direccion y comuna'
+
+  const distance = distanceMeters(left, right)
+  const nameScore = sim(left.normalized_name || left.name, right.normalized_name || right.name)
+  if (distance != null && distance < 250 && nameScore >= 0.62) return `Nombre parecido a ${distance} m`
+
+  return null
+}
+
+function supermarketDuplicatePairs(stores) {
+  const supermarkets = stores.filter(store => store.is_active !== false && isSupermarketStore(store))
+  const pairs = []
+  for (let i = 0; i < supermarkets.length; i += 1) {
+    for (let j = i + 1; j < supermarkets.length; j += 1) {
+      const reason = supermarketDuplicateReason(supermarkets[i], supermarkets[j])
+      if (reason) pairs.push({ left: supermarkets[i], right: supermarkets[j], reason })
+    }
+  }
+  return pairs.slice(0, 30)
 }
 
 function territorialReviewIssue(row) {
@@ -212,7 +282,7 @@ function duplicatePairs(items, getText, minScore = 0.62) {
 }
 
 export default function DataQuality() {
-  const { isValidator, user } = useAuth()
+  const { isValidator, isAdmin, user } = useAuth()
   const [tab, setTab] = useState('reportes')
   const [products, setProducts] = useState([])
   const [stores, setStores] = useState([])
@@ -281,6 +351,23 @@ export default function DataQuality() {
 
   const productDuplicates = useMemo(() => duplicatePairs(activeProducts, p => `${p.name} ${p.category || ''}`, 0.67), [activeProducts])
   const storeDuplicates = useMemo(() => duplicatePairs(activeStores, s => `${s.name} ${s.sector || ''} ${s.address || ''}`, 0.6), [activeStores])
+  const supermarketStores = useMemo(() => activeStores.filter(isSupermarketStore), [activeStores])
+  const supermarketDuplicates = useMemo(() => supermarketDuplicatePairs(activeStores), [activeStores])
+  const supermarketRows = useMemo(() => {
+    const q = normalize(query)
+    return supermarketStores
+      .map(store => ({ store, issues: supermarketIssues(store) }))
+      .filter(row => q ? normalize(`${row.store.name} ${row.store.chain_name} ${row.store.chain} ${row.store.address} ${row.store.commune} ${row.store.sector}`).includes(q) : row.issues.length > 0)
+      .sort((a, b) => b.issues.length - a.issues.length || a.store.name.localeCompare(b.store.name))
+      .slice(0, 120)
+  }, [supermarketStores, query])
+  const supermarketSummary = useMemo(() => ({
+    duplicates: supermarketDuplicates.length,
+    withoutCoords: supermarketStores.filter(store => !hasCoords(store)).length,
+    withoutChain: supermarketStores.filter(store => !store.chain_name && !store.chain).length,
+    incompleteLocation: supermarketStores.filter(store => !store.region || !store.city || !store.commune).length,
+    pending: supermarketStores.filter(store => !store.verification_status || store.verification_status === 'pending' || store.is_verified === false).length,
+  }), [supermarketStores, supermarketDuplicates])
   const territorialIssues = useMemo(() => {
     const q = normalize(query)
     const fromView = territorialReview.map(viewRow => {
@@ -357,6 +444,11 @@ export default function DataQuality() {
     if (error) return setMessage({ type: 'error', text: error.message })
     setMessage({ type: 'ok', text: 'Negocio actualizado.' })
     await load()
+  }
+
+  async function verifySupermarket(store) {
+    if (!isAdmin) return setMessage({ type: 'error', text: 'Solo admins pueden verificar supermercados.' })
+    return updateStore(store, { is_verified: true, verification_status: 'verified' })
   }
 
   async function reverseLocationFromCoords(coords) {
@@ -552,6 +644,11 @@ export default function DataQuality() {
       setMessage({ type: 'error', text: 'Selecciona origen y destino diferentes.' })
       return
     }
+    const supermarketMerge = mergeDraft.kind === 'negocio' && (isSupermarketStore(mergeDraft.source) || isSupermarketStore(mergeDraft.target))
+    if (supermarketMerge && !isAdmin) {
+      setMessage({ type: 'error', text: 'Solo admins pueden fusionar supermercados.' })
+      return
+    }
 
     const ok = window.confirm(`Fusionar "${mergeDraft.source.name}" dentro de "${mergeDraft.target.name}"?`)
     if (!ok) return
@@ -586,8 +683,15 @@ export default function DataQuality() {
 
       {message && <div className={`rounded-2xl border p-3 text-sm font-semibold ${message.type === 'error' ? 'border-red-100 bg-red-50 text-red-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>{message.text}</div>}
 
-      <div className="grid grid-cols-5 gap-2 rounded-2xl bg-slate-100 p-1 text-xs font-black">
-        {['reportes','productos','negocios','duplicados','territorio'].map(item => <button key={item} onClick={() => setTab(item)} className={`rounded-xl py-2 ${tab === item ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500'}`}>{item}</button>)}
+      <div className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-100 p-1 text-xs font-black sm:grid-cols-6">
+        {[
+          ['reportes', 'reportes'],
+          ['productos', 'productos'],
+          ['negocios', 'negocios'],
+          ['supermercados', 'supermercados'],
+          ['duplicados', 'duplicados'],
+          ['territorio', 'territorio'],
+        ].map(([id, label]) => <button key={id} onClick={() => setTab(id)} className={`rounded-xl py-2 ${tab === id ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500'}`}>{label}</button>)}
       </div>
 
       <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar..." className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm" />
@@ -667,6 +771,91 @@ export default function DataQuality() {
             </div>
           ))}
           {storesForQuality.length === 0 && <p className="rounded-2xl bg-white p-4 text-sm text-slate-500 shadow-sm">No hay negocios sin coordenadas o con ese filtro.</p>}
+        </section>
+      )}
+
+      {tab === 'supermercados' && (
+        <section className="space-y-4">
+          <div className="rounded-[2rem] border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-black">Registro de supermercados</p>
+                <p className="mt-1">Revisa duplicados, coordenadas, cadena, ubicacion territorial y candidatos pendientes antes de validar sucursales.</p>
+              </div>
+              {isAdmin ? (
+                <Link to="/supermarkets-admin" className="rounded-2xl bg-blue-600 px-4 py-3 text-xs font-black text-white">Abrir importador</Link>
+              ) : (
+                <Pill tone="amber">solo admins importan</Pill>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <div className="rounded-2xl bg-white p-3 text-center shadow-sm"><p className="text-lg font-black text-slate-900">{supermarketSummary.duplicates}</p><p className="text-[11px] text-slate-500">duplicados</p></div>
+            <div className="rounded-2xl bg-white p-3 text-center shadow-sm"><p className="text-lg font-black text-slate-900">{supermarketSummary.withoutCoords}</p><p className="text-[11px] text-slate-500">sin coords</p></div>
+            <div className="rounded-2xl bg-white p-3 text-center shadow-sm"><p className="text-lg font-black text-slate-900">{supermarketSummary.withoutChain}</p><p className="text-[11px] text-slate-500">sin cadena</p></div>
+            <div className="rounded-2xl bg-white p-3 text-center shadow-sm"><p className="text-lg font-black text-slate-900">{supermarketSummary.incompleteLocation}</p><p className="text-[11px] text-slate-500">ubicacion</p></div>
+            <div className="rounded-2xl bg-white p-3 text-center shadow-sm"><p className="text-lg font-black text-slate-900">{supermarketSummary.pending}</p><p className="text-[11px] text-slate-500">pendientes</p></div>
+          </div>
+
+          <div className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
+            <h2 className="font-black text-slate-900">Supermercados para revisar</h2>
+            <div className="mt-3 space-y-2">
+              {supermarketRows.map(({ store, issues }) => (
+                <div key={store.id} className="rounded-2xl bg-slate-50 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-bold text-slate-900">{store.name}</p>
+                      <p className="truncate text-xs text-slate-500">{store.chain_name || store.chain || 'Sin cadena'} - {store.address || 'Sin direccion'}</p>
+                      <p className="truncate text-xs text-slate-400">{[store.region, store.city, store.commune, store.sector].filter(Boolean).join(' - ') || 'Ubicacion incompleta'}</p>
+                    </div>
+                    <div className="flex max-w-[46%] flex-wrap justify-end gap-1">
+                      {issues.map(issue => <Pill key={issue} tone={issue === 'sin coordenadas' ? 'red' : issue === 'pendiente' ? 'blue' : 'amber'}>{issue}</Pill>)}
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    <Field label="Cadena">
+                      <input defaultValue={store.chain_name || store.chain || ''} onBlur={e => e.target.value !== (store.chain_name || store.chain || '') && updateStore(store, { chain_name: e.target.value || null, chain: e.target.value || null })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+                    </Field>
+                    <Field label="Comuna">
+                      <input defaultValue={store.commune || ''} onBlur={e => e.target.value !== (store.commune || '') && updateStore(store, { commune: e.target.value || null })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+                    </Field>
+                    <Field label="Sector">
+                      <input defaultValue={store.sector || ''} onBlur={e => e.target.value !== (store.sector || '') && updateStore(store, { sector: e.target.value || null })} className="rounded-xl border border-slate-200 px-3 py-2 text-sm" placeholder="Opcional" />
+                    </Field>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {isAdmin && (
+                      <button disabled={saving || store.is_verified} onClick={() => verifySupermarket(store)} className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white disabled:opacity-50">
+                        {store.is_verified ? 'Verificado' : 'Verificar'}
+                      </button>
+                    )}
+                    <Link to="/supermarkets-admin" className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-700">Abrir en importador</Link>
+                  </div>
+                </div>
+              ))}
+              {supermarketRows.length === 0 && <p className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">No hay supermercados con problemas visibles en este filtro.</p>}
+            </div>
+          </div>
+
+          <div className="rounded-[2rem] border border-slate-100 bg-white p-4 shadow-sm">
+            <h2 className="font-black text-slate-900">Duplicados de supermercados</h2>
+            <div className="mt-3 space-y-2">
+              {supermarketDuplicates.map(pair => (
+                <div key={`supermarket-${pair.left.id}-${pair.right.id}`} className="rounded-2xl bg-amber-50 p-3 text-sm text-amber-900">
+                  <p className="font-black">{pair.reason}</p>
+                  <p>{pair.left.name} - {pair.left.address || 'Sin direccion'}</p>
+                  <p>{pair.right.name} - {pair.right.address || 'Sin direccion'}</p>
+                  {isAdmin ? (
+                    <button type="button" onClick={() => prepareMerge('negocio', pair.left, pair.right)} className="mt-2 rounded-xl bg-amber-600 px-3 py-2 text-xs font-black text-white">Preparar fusion</button>
+                  ) : (
+                    <p className="mt-2 text-xs font-bold">Solo admins pueden fusionar supermercados.</p>
+                  )}
+                </div>
+              ))}
+              {supermarketDuplicates.length === 0 && <p className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">No se detectaron duplicados de supermercados.</p>}
+            </div>
+          </div>
         </section>
       )}
 
@@ -773,22 +962,29 @@ export default function DataQuality() {
             <h2 className="font-black text-slate-900">Negocios duplicados o parecidos</h2>
             <p className="mt-1 text-xs text-slate-500">Prepara la fusion y revisa origen/destino antes de confirmarla.</p>
             <div className="mt-3 space-y-2">
-              {storeDuplicates.map(pair => (
-                <div key={`store-${pair.left.id}-${pair.right.id}`} className="rounded-2xl bg-slate-50 p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="font-bold text-slate-900">{pair.left.name}</p>
-                      <p className="text-xs text-slate-500">{pair.left.sector || 'Sin sector'} · {pair.left.address || 'Sin direccion'}</p>
-                      <p className="mt-2 font-bold text-slate-900">{pair.right.name}</p>
-                      <p className="text-xs text-slate-500">{pair.right.sector || 'Sin sector'} · {pair.right.address || 'Sin direccion'}</p>
-                    </div>
-                    <div className="shrink-0 text-right">
-                      <Pill tone="amber">{Math.round(pair.score * 100)}%</Pill>
-                      <button type="button" onClick={() => prepareMerge('negocio', pair.left, pair.right)} className="mt-2 block rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white">Preparar fusion</button>
+              {storeDuplicates.map(pair => {
+                const supermarketPair = isSupermarketStore(pair.left) || isSupermarketStore(pair.right)
+                return (
+                  <div key={`store-${pair.left.id}-${pair.right.id}`} className="rounded-2xl bg-slate-50 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-bold text-slate-900">{pair.left.name}</p>
+                        <p className="text-xs text-slate-500">{pair.left.sector || 'Sin sector'} · {pair.left.address || 'Sin direccion'}</p>
+                        <p className="mt-2 font-bold text-slate-900">{pair.right.name}</p>
+                        <p className="text-xs text-slate-500">{pair.right.sector || 'Sin sector'} · {pair.right.address || 'Sin direccion'}</p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <Pill tone="amber">{Math.round(pair.score * 100)}%</Pill>
+                        {supermarketPair && !isAdmin ? (
+                          <p className="mt-2 max-w-32 text-xs font-bold text-amber-700">Solo admins fusionan supermercados.</p>
+                        ) : (
+                          <button type="button" onClick={() => prepareMerge('negocio', pair.left, pair.right)} className="mt-2 block rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white">Preparar fusion</button>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
               {storeDuplicates.length === 0 && <p className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">No se detectaron negocios parecidos.</p>}
             </div>
           </div>

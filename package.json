@@ -8,7 +8,8 @@
     "build": "node scripts/build.mjs",
     "preview": "vite preview",
     "lint": "eslint src --ext js,jsx --report-unused-disable-directives --max-warnings 0",
-    "test:receipt-parser": "node --test src/utils/receiptParser.test.js"
+    "test:receipt-parser": "node --test src/utils/receiptParser.test.js",
+    "test:web-price-parser": "node --test shared/webPriceParser.test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.43.4",

@@ -1,4 +1,4 @@
-import { Outlet } from 'react-router-dom'
+import { Link, Outlet } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import BottomNav from './BottomNav'
 import { useAuth } from '../../context/AuthContext'
@@ -13,7 +13,7 @@ function BrandMark() {
 }
 
 export default function Layout() {
-  const { profile, signOut } = useAuth()
+  const { profile, signOut, isAdmin } = useAuth()
   const [zone, setZone] = useState(() => getStoredZone())
 
   useEffect(() => {
@@ -42,10 +42,21 @@ export default function Layout() {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-3">
+
             <span className="hidden max-w-[160px] truncate text-xs font-bold text-white/80 sm:block">{profile?.username}</span>
             <button onClick={signOut} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold transition hover:bg-white/20">Salir</button>
           </div>
         </div>
+        {isAdmin && (
+          <nav className="mx-auto flex max-w-5xl gap-2 border-t border-white/10 px-4 py-2">
+            <Link to="/supermarkets-admin" className="rounded-xl bg-white/10 px-3 py-1.5 text-[11px] font-bold transition hover:bg-white/20">
+              Supermercados
+            </Link>
+            <Link to="/web-prices-admin" className="rounded-xl bg-white/10 px-3 py-1.5 text-[11px] font-bold transition hover:bg-white/20">
+              Precios web
+            </Link>
+          </nav>
+        )}
       </header>
       <main className="flex-1 pb-36 page-enter">
         <Outlet />

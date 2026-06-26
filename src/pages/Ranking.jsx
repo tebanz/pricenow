@@ -34,7 +34,69 @@ function getProductName(row) {
 
 function getProductCategory(row) {
   const product = getLinkedProduct(row)
-  return product?.category || inferCategory(row)
+  return product?.category || row.web_category || inferCategory(row)
+}
+
+function getWebProduct(row) {
+  return Array.isArray(row.web_catalog_products) ? row.web_catalog_products[0] : row.web_catalog_products
+}
+
+function getWebStore(row) {
+  return Array.isArray(row.stores) ? row.stores[0] : row.stores
+}
+
+function normalizeWebUnit(unit = '') {
+  const key = normalizeText(unit)
+  if (['kg', 'kilogramo', 'kilogramos'].includes(key)) return 'kg'
+  if (['g', 'gr', 'gramo', 'gramos'].includes(key)) return 'g'
+  if (['l', 'lt', 'litro', 'litros'].includes(key)) return 'litro'
+  if (['ml', 'cc', 'mililitro', 'mililitros'].includes(key)) return 'ml'
+  if (['caja'].includes(key)) return 'caja'
+  if (['par'].includes(key)) return 'par'
+  return 'unidad'
+}
+
+function webObservationToRankingRow(row) {
+  const product = getWebProduct(row) || {}
+  const store = getWebStore(row) || {}
+  const unit = normalizeWebUnit(product.unit)
+  const storeName = store.name || `${row.chain_name || 'Supermercado'} online`
+  const webZone = row.location_scope === 'online_national'
+    ? 'Online Chile'
+    : row.location_verified && (row.city || row.commune)
+      ? `Online ${row.city || row.commune}`
+      : 'Online - zona no confirmada'
+
+  return {
+    id: `web-${row.id}`,
+    product_id: product.product_id || null,
+    product_name: product.name || 'Producto web',
+    web_category: product.category || 'Sin categoria',
+    brand: product.brand || '',
+    quantity: Number(product.quantity) > 0 ? Number(product.quantity) : 1,
+    unit,
+    price: Number(row.final_price),
+    normal_price: row.normal_price,
+    final_price: row.final_price,
+    unit_price: row.unit_price,
+    store_id: row.store_id,
+    store_name: storeName,
+    sector: store.sector || webZone,
+    city: row.city || store.city || '',
+    commune: row.commune || store.commune || '',
+    purchase_latitude: store.latitude,
+    purchase_longitude: store.longitude,
+    purchase_date: row.captured_at?.slice(0, 10),
+    source_channel: 'web',
+    source_url: row.source_url,
+    captured_at: row.captured_at,
+    location_scope: row.location_scope,
+    location_verified: Boolean(row.location_verified),
+    stock_status: row.stock_status,
+    promotion_text: row.promotion_text,
+    validation_status: 'approved',
+    products: null,
+  }
 }
 
 function inferCategory(row) {
@@ -70,10 +132,24 @@ function isCompatibleUnit(rowUnit, standardUnit) {
   return unit === standardUnit
 }
 
+function productComparisonSignature(row) {
+  const brand = normalizeText(row.brand || '')
+  const unit = comparableUnit(row.unit)
+  const quantity = Number(row.quantity) > 0 ? Number(row.quantity) : 1
+  const stopwords = new Set(['de', 'del', 'la', 'el', 'y', 'con', 'bolsa', 'envase', 'contenido', 'jumbo', 'unimarc', 'tottus', 'lider'])
+  const tokens = normalizeText(getProductName(row))
+    .replace(/\bgrado 1\b/g, ' g1 ')
+    .replace(/\bgrado 2\b/g, ' g2 ')
+    .split(' ')
+    .filter(token => token && !stopwords.has(token) && !/^\d+(?:kg|g|ml|l|cc)?$/.test(token))
+  const uniqueSorted = [...new Set(tokens)].sort().join('_')
+  return `${brand}__${uniqueSorted}__${quantity}_${unit}`
+}
+
 function getProductKey(row) {
   const product = getLinkedProduct(row)
   const unit = inferStandardUnit(row)
-  const base = product?.id || row.product_id || normalizeText(getProductName(row))
+  const base = product?.id || row.product_id || productComparisonSignature(row)
   return `${base}__${unit}`
 }
 
@@ -97,16 +173,24 @@ function rowDistanceFromZone(row, zone) {
 function filterRowsByZone(rows, zoneMode, zone) {
   if (zoneMode === 'all') return rows
   if (zoneMode === 'city' || zoneMode === 'commune') {
-    if (!zoneCity(zone)) return rows
-    return rows.filter(row => rowMatchesCity(row, zone))
+    if (!zoneCity(zone)) return rows.filter(row => row.source_channel !== 'web' || row.location_scope === 'online_national')
+    return rows.filter(row => {
+      if (row.source_channel === 'web' && !row.location_verified) return false
+      if (row.source_channel === 'web' && row.location_scope === 'online_national') return true
+      return rowMatchesCity(row, zone)
+    })
   }
   if (zoneMode === 'sector') {
-    if (!zoneSector(zone)) return rows
-    return rows.filter(row => rowMatchesSector(row, zone))
+    if (!zoneSector(zone)) return rows.filter(row => row.source_channel !== 'web')
+    return rows.filter(row => {
+      if (row.source_channel === 'web' && row.location_scope !== 'branch_confirmed') return false
+      return rowMatchesSector(row, zone)
+    })
   }
   if (zoneMode === 'nearby') {
-    if (!isValidCoordinate(zone?.lat, zone?.lng)) return rows
+    if (!isValidCoordinate(zone?.lat, zone?.lng)) return rows.filter(row => row.source_channel !== 'web')
     return rows.filter(row => {
+      if (row.source_channel === 'web' && row.location_scope !== 'branch_confirmed') return false
       const distance = rowDistanceFromZone(row, zone)
       return distance != null && distance <= 5000
     })
@@ -123,7 +207,7 @@ function zoneFilterLabel(zoneMode, zone) {
   return 'Todas las zonas'
 }
 
-function buildRanking(rows, searchTerm) {
+function buildRanking(rows, searchTerm, categoryFilter = 'all', sortMode = 'category_price') {
   const term = normalizeText(searchTerm)
   const groups = {}
 
@@ -134,6 +218,7 @@ function buildRanking(rows, searchTerm) {
     const searchText = normalizeText(`${productName} ${category} ${row.product_name || ''} ${row.brand || ''}`)
 
     if (term && !searchText.includes(term)) return
+    if (categoryFilter !== 'all' && category !== categoryFilter) return
 
     const groupKey = getProductKey(row)
     const unitPrice = effectiveUnitPrice(row)
@@ -158,12 +243,14 @@ function buildRanking(rows, searchTerm) {
     }
 
     const storeZone = [rowCity(row) || rowCommune(row), rowSector(row)].filter(Boolean).join(' - ') || 'Sin zona'
-    const storeKey = `${normalizeText(row.store_name)}__${storeZone}`
+    const storeKey = `${normalizeText(row.store_name)}__${storeZone}__${row.source_channel || 'presencial'}`
     if (!groups[groupKey].stores[storeKey]) {
       groups[groupKey].stores[storeKey] = {
         store_name: row.store_name || 'Tienda sin nombre',
         sector: storeZone,
         unit: standardUnit,
+        source_channel: row.source_channel || 'presencial',
+        location_scope: row.location_scope || null,
         unit_prices: [],
         entries: [],
         latest_date: null,
@@ -173,17 +260,18 @@ function buildRanking(rows, searchTerm) {
     const store = groups[groupKey].stores[storeKey]
     store.unit_prices.push(unitPrice)
     store.entries.push(row)
-    if (!store.latest_date || row.purchase_date > store.latest_date) {
-      store.latest_date = row.purchase_date
-    }
+    if (!store.latest_date || row.purchase_date > store.latest_date) store.latest_date = row.purchase_date
   })
 
-  return Object.values(groups)
+  const ranking = Object.values(groups)
     .map(group => {
       const stores = Object.values(group.stores)
         .map(store => {
-          const minUnitPrice = Math.min(...store.unit_prices)
-          const bestEntry = store.entries.find(entry => Number(entry.unit_price) === minUnitPrice) || store.entries[0]
+          const bestEntry = store.entries.reduce((best, entry) => {
+            if (!best) return entry
+            return effectiveUnitPrice(entry) < effectiveUnitPrice(best) ? entry : best
+          }, null)
+          const minUnitPrice = effectiveUnitPrice(bestEntry)
 
           return {
             ...store,
@@ -198,14 +286,37 @@ function buildRanking(rows, searchTerm) {
       return {
         ...group,
         stores,
+        lowest_price: stores[0]?.min_unit_price ?? Number.POSITIVE_INFINITY,
         comparable_count: stores.reduce((acc, store) => acc + store.sample_count, 0),
       }
     })
     .filter(group => group.stores.length > 0)
-    .sort((a, b) => {
-      if (b.comparable_count !== a.comparable_count) return b.comparable_count - a.comparable_count
-      return a.product_name.localeCompare(b.product_name, 'es')
-    })
+
+  ranking.sort((a, b) => {
+    if (sortMode === 'price_asc') return a.lowest_price - b.lowest_price || a.product_name.localeCompare(b.product_name, 'es')
+    if (sortMode === 'price_desc') return b.lowest_price - a.lowest_price || a.product_name.localeCompare(b.product_name, 'es')
+    if (sortMode === 'name') return a.product_name.localeCompare(b.product_name, 'es')
+    const categoryCompare = a.category.localeCompare(b.category, 'es')
+    if (categoryCompare !== 0) return categoryCompare
+    return a.lowest_price - b.lowest_price || a.product_name.localeCompare(b.product_name, 'es')
+  })
+
+  return ranking
+}
+
+async function fetchAllPages(buildQuery, pageSize = 1000, maxPages = 50) {
+  const rows = []
+  for (let page = 0; page < maxPages; page += 1) {
+    const from = page * pageSize
+    const to = from + pageSize - 1
+    // eslint-disable-next-line no-await-in-loop
+    const result = await buildQuery().range(from, to)
+    if (result.error) return { data: rows, error: result.error, truncated: false }
+    const batch = result.data || []
+    rows.push(...batch)
+    if (batch.length < pageSize) return { data: rows, error: null, truncated: false }
+  }
+  return { data: rows, error: null, truncated: true }
 }
 
 function StatPill({ label, value }) {
@@ -223,7 +334,9 @@ export default function Ranking() {
   const [query, setQuery] = useState('')
   const [zoneMode, setZoneMode] = useState(() => zoneCity(getStoredZone()) ? 'city' : 'all')
   const [currentZone, setCurrentZone] = useState(() => getStoredZone())
-  const [period, setPeriod] = useState('30d')
+  const [period, setPeriod] = useState('all')
+  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [sortMode, setSortMode] = useState('category_price')
   const [rows, setRows] = useState([])
   const [results, setResults] = useState([])
   const [loading, setLoading] = useState(false)
@@ -245,52 +358,103 @@ export default function Ranking() {
     setError(null)
     setSearched(true)
 
-    let request = supabase
-      .from('price_entries')
-      .select(`
-        *,
-        products(id, name, category, subcategory, default_unit)
-      `)
-      .eq('validation_status', 'approved')
-      .order('purchase_date', { ascending: false })
-      .limit(2500)
+    const since = period === '30d' || period === '90d'
+      ? (() => {
+        const value = new Date()
+        value.setDate(value.getDate() - (period === '30d' ? 30 : 90))
+        return value
+      })()
+      : null
 
-    if (period === '30d') {
-      const since = new Date()
-      since.setDate(since.getDate() - 30)
-      request = request.gte('purchase_date', since.toISOString().slice(0, 10))
+    const buildPriceRequest = () => {
+      let request = supabase
+        .from('price_entries')
+        .select(`
+          *,
+          products(id, name, category, subcategory, default_unit),
+          stores(id, is_active)
+        `)
+        .eq('validation_status', 'approved')
+        .order('purchase_date', { ascending: false })
+      if (since) request = request.gte('purchase_date', since.toISOString().slice(0, 10))
+      return request
     }
 
-    if (period === '90d') {
-      const since = new Date()
-      since.setDate(since.getDate() - 90)
-      request = request.gte('purchase_date', since.toISOString().slice(0, 10))
+    const buildWebRequest = () => {
+      let request = supabase
+        .from('web_price_observations')
+        .select(`
+          id, web_product_id, chain_name, store_id, city, commune, location_scope, location_verified,
+          normal_price, final_price, unit_price, unit_label, promotion_text, stock_status, source_url, captured_at,
+          web_catalog_products(id, product_id, name, brand, category, package_text, quantity, unit),
+          stores(id, name, sector, city, commune, latitude, longitude, is_active)
+        `)
+        .eq('review_status', 'approved')
+        .neq('stock_status', 'out_of_stock')
+        .order('captured_at', { ascending: false })
+      if (since) request = request.gte('captured_at', since.toISOString())
+      return request
     }
 
-    const { data, error: fetchError } = await request
+    const [priceResult, webResult] = await Promise.all([
+      fetchAllPages(buildPriceRequest),
+      fetchAllPages(buildWebRequest),
+    ])
 
-    if (fetchError) {
-      setError(fetchError.message)
+    if (priceResult.error) {
+      setError(priceResult.error.message)
       setRows([])
       setResults([])
       setLoading(false)
       return
     }
 
-    const nextRows = filterRowsByZone(data || [], zoneMode, currentZone)
+    const webTableMissing = webResult.error && (
+      webResult.error.code === 'PGRST205' ||
+      webResult.error.code === '42P01' ||
+      /web_price_observations|schema cache|relation/i.test(webResult.error.message || '')
+    )
+
+    if (webResult.error && !webTableMissing) {
+      console.error('EdePrecios web prices load failed:', webResult.error)
+    }
+
+    const approvedStoreRows = (priceResult.data || []).filter(row => {
+      const store = getWebStore(row)
+      return !store || store.is_active !== false
+    })
+    const approvedWebRows = webResult.error ? [] : (webResult.data || [])
+      .filter(row => {
+        const store = getWebStore(row)
+        return !store || store.is_active !== false
+      })
+      .map(webObservationToRankingRow)
+
+    if (priceResult.truncated || webResult.truncated) {
+      console.warn('EdePrecios ranking reached the pagination safety limit.')
+    }
+
+    const combinedRows = [...approvedStoreRows, ...approvedWebRows]
+    const nextRows = filterRowsByZone(combinedRows, zoneMode, currentZone)
     setRows(nextRows)
-    setResults(buildRanking(nextRows, query))
+    setResults(buildRanking(nextRows, query, categoryFilter, sortMode))
     setLoading(false)
-  }, [period, zoneMode, currentZone?.city, currentZone?.commune, currentZone?.sector, currentZone?.suburb, currentZone?.district, currentZone?.lat, currentZone?.lng, query])
+  }, [period, zoneMode, currentZone?.city, currentZone?.commune, currentZone?.sector, currentZone?.suburb, currentZone?.district, currentZone?.lat, currentZone?.lng, query, categoryFilter, sortMode])
 
   useEffect(() => {
     loadRows()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period, zoneMode, currentZone?.city, currentZone?.commune, currentZone?.sector, currentZone?.suburb, currentZone?.district, currentZone?.lat, currentZone?.lng])
 
+  useEffect(() => {
+    setResults(buildRanking(rows, query, categoryFilter, sortMode))
+    // Search text is intentionally applied with the Buscar button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryFilter, sortMode])
+
   function handleSearch(e) {
     e.preventDefault()
-    setResults(buildRanking(rows, query))
+    setResults(buildRanking(rows, query, categoryFilter, sortMode))
     setSearched(true)
   }
 
@@ -318,6 +482,7 @@ export default function Ranking() {
     )
   }
 
+  const categories = [...new Set(rows.map(row => getProductCategory(row)).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es'))
   const totalComparable = results.reduce((acc, group) => acc + group.comparable_count, 0)
 
   return (
@@ -354,11 +519,32 @@ export default function Ranking() {
             </select>
           </label>
 
-          <select value={period} onChange={e => setPeriod(e.target.value)} className="input-field">
-            <option value="30d">Últimos 30 días</option>
-            <option value="90d">Últimos 90 días</option>
-            <option value="all">Todos</option>
-          </select>
+          <label className="grid gap-1 text-[11px] font-black uppercase tracking-wide text-slate-400">
+            Periodo
+            <select value={period} onChange={e => setPeriod(e.target.value)} className="input-field normal-case tracking-normal">
+              <option value="all">Todos los aprobados</option>
+              <option value="30d">Ultimos 30 dias</option>
+              <option value="90d">Ultimos 90 dias</option>
+            </select>
+          </label>
+
+          <label className="grid gap-1 text-[11px] font-black uppercase tracking-wide text-slate-400">
+            Categoria
+            <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)} className="input-field normal-case tracking-normal">
+              <option value="all">Todas</option>
+              {categories.map(category => <option key={category} value={category}>{category}</option>)}
+            </select>
+          </label>
+
+          <label className="grid gap-1 text-[11px] font-black uppercase tracking-wide text-slate-400">
+            Orden
+            <select value={sortMode} onChange={e => setSortMode(e.target.value)} className="input-field normal-case tracking-normal">
+              <option value="category_price">Categoria y menor precio</option>
+              <option value="price_asc">Menor precio</option>
+              <option value="price_desc">Mayor precio</option>
+              <option value="name">Nombre</option>
+            </select>
+          </label>
         </div>
         <p className="text-xs font-semibold text-slate-400">Zona: {zoneFilterLabel(zoneMode, currentZone)}</p>
       </form>
@@ -373,8 +559,17 @@ export default function Ranking() {
         </div>
       )}
 
-      {!loading && results.map((group, gi) => (
+      {!loading && results.map((group, gi) => {
+        const showCategoryHeader = gi === 0 || results[gi - 1]?.category !== group.category
+        return (
         <div key={`${group.product_name}-${gi}`} className="mb-5">
+          {showCategoryHeader && sortMode === 'category_price' && (
+            <div className="mb-3 mt-6 flex items-center gap-2">
+              <div className="h-px flex-1 bg-slate-200" />
+              <h3 className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">{group.category}</h3>
+              <div className="h-px flex-1 bg-slate-200" />
+            </div>
+          )}
           <div className="flex items-start justify-between gap-3 mb-2">
             <div>
               <h3 className="font-black text-slate-900">{group.product_name}</h3>
@@ -391,16 +586,22 @@ export default function Ranking() {
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-slate-800 truncate">{store.store_name}</p>
                     <p className="text-xs text-slate-400 truncate">{store.sector}</p>
-                    {hasOffer(store.best_entry) && <span className="mt-1 inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black text-emerald-700">Oferta</span>}
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {hasOffer(store.best_entry) && <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black text-emerald-700">Oferta</span>}
+                      {store.source_channel === 'web' && <span className="inline-flex rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-black text-blue-700">Precio web</span>}
+                      {store.source_channel === 'web' && !store.best_entry?.location_verified && <span className="inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black text-amber-700">Zona no confirmada</span>}
+                    </div>
                     {store.best_entry?.brand && <p className="text-[11px] text-slate-400 truncate">Marca: {store.best_entry.brand}</p>}
+                    {store.source_channel === 'web' && store.best_entry?.source_url && <a href={store.best_entry.source_url} target="_blank" rel="noreferrer" className="text-[11px] font-bold text-blue-600 underline">Fuente oficial</a>}
                     {paymentConditionLabel(store.best_entry) && <p className="text-[11px] font-semibold text-blue-600 truncate">Con {paymentConditionLabel(store.best_entry)}</p>}
                   </div>
                 </div>
 
                 <div className="text-right shrink-0">
                   <p className="font-black text-brand-600 text-base">{formatUnitPrice(store.min_unit_price, group.unit)}</p>
-                  <p className="text-xs text-slate-400">Compra real: {formatCLP(effectivePrice(store.best_entry))}</p>
+                  <p className="text-xs text-slate-400">{store.source_channel === 'web' ? 'Precio publicado' : 'Compra real'}: {formatCLP(effectivePrice(store.best_entry))}</p>
                   <p className="text-[11px] text-slate-400">{store.sample_count} registro{store.sample_count === 1 ? '' : 's'}</p>
+                  {store.latest_date && <p className="text-[10px] text-slate-400">Actualizado: {new Date(`${store.latest_date}T12:00:00`).toLocaleDateString('es-CL')}</p>}
                   {i === 0 && <span className="badge-lowest mt-1">Mejor estándar</span>}
                 </div>
               </div>
@@ -411,7 +612,8 @@ export default function Ranking() {
             <p className="text-xs text-amber-600 mt-2">{group.skipped_count} registro{group.skipped_count === 1 ? '' : 's'} no se usaron porque no tenían una unidad comparable con {group.unit}.</p>
           )}
         </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
