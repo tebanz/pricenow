@@ -10,8 +10,7 @@ import {
 } from './location'
 
 export function normalizeCompareText(value = '') {
-  return value
-    .toString()
+  return String(value ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
@@ -154,8 +153,11 @@ export function unifyWebObservation(row = {}) {
   const product = embedded(row.product || row.web_catalog_products) || {}
   const store = embedded(row.stores) || {}
   if (store?.is_active === false) return null
+  if (row.review_status && row.review_status !== 'approved') return null
 
-  const finalPrice = Number(row.final_price)
+  const finalCandidate = Number(row.final_price)
+  const normalCandidate = Number(row.normal_price)
+  const finalPrice = Number.isFinite(finalCandidate) && finalCandidate > 0 ? finalCandidate : normalCandidate
   if (!Number.isFinite(finalPrice) || finalPrice <= 0) return null
 
   const name = product.name || 'Producto web'
@@ -163,32 +165,52 @@ export function unifyWebObservation(row = {}) {
   const quantity = Number(product.quantity) > 0 ? Number(product.quantity) : 1
   const coords = coordinatesFrom(row, store)
   const productId = product.product_id || product.id || null
-  const normalPrice = Number(row.normal_price)
+  const normalPrice = Number.isFinite(normalCandidate) && normalCandidate > 0 ? normalCandidate : null
+  const formatLabel = product.package_text || formatPackage(quantity, unit)
+  const sourceDetail = row.location_scope === 'online_unverified'
+    ? 'Precio online · ubicación no confirmada'
+    : row.location_scope === 'online_national'
+      ? 'Precio online nacional'
+      : 'Precio web'
+  const storeName = store.name || row.chain_name || 'Supermercado online'
+  const branchName = store.id || row.location_scope === 'branch_confirmed' ? branchNameFrom(row, store) : ''
+  const chainName = store.chain_name || store.chain || row.chain_name || ''
+  const locationVerified = Boolean(row.location_verified)
 
   return {
     id: `web-${row.id}`,
     raw_id: row.id,
     source_channel: 'web',
+    sourceType: 'web',
     source_label: 'Precio web',
-    source_detail: row.location_scope === 'online_national' ? 'Online Chile' : 'Catalogo oficial',
+    sourceLabel: 'Precio web',
+    source_detail: sourceDetail,
     product_id: productId,
     product_name: name,
+    productName: name,
+    normalizedName: product.normalized_name || normalizeCompareText(name),
     brand: product.brand || '',
     category: product.category || 'Sin categoria',
-    format_label: product.package_text || formatPackage(quantity, unit),
+    format_label: formatLabel,
+    packageText: formatLabel,
     quantity,
     unit,
     compare_key: compareKeyFor({ productId, name, brand: product.brand, quantity, unit }),
     final_price: finalPrice,
-    normal_price: normalPrice > finalPrice ? normalPrice : null,
+    effectivePrice: finalPrice,
+    normal_price: normalPrice && normalPrice > finalPrice ? normalPrice : null,
+    normalPrice: normalPrice && normalPrice > finalPrice ? normalPrice : null,
     unit_price: Number(row.unit_price) > 0 ? Number(row.unit_price) : calcUnitPrice(finalPrice, quantity, unit),
     has_offer: normalPrice > finalPrice,
     offer_text: row.promotion_text || '',
+    promotionText: row.promotion_text || '',
     payment_condition: '',
     store_id: row.store_id || store.id || null,
-    store_name: storeNameFrom(row, store),
-    branch_name: branchNameFrom(row, store),
-    chain_name: store.chain_name || store.chain || row.chain_name || '',
+    store_name: storeName,
+    storeName,
+    branch_name: branchName,
+    chain_name: chainName,
+    chainName,
     sector: store.sector || '',
     city: row.city || store.city || '',
     commune: row.commune || store.commune || '',
@@ -196,10 +218,15 @@ export function unifyWebObservation(row = {}) {
     latitude: coords.lat,
     longitude: coords.lng,
     date: row.captured_at,
+    capturedAt: row.captured_at,
     availability: row.stock_status || '',
+    stockStatus: row.stock_status || '',
     location_scope: row.location_scope,
-    location_verified: Boolean(row.location_verified),
+    locationScope: row.location_scope,
+    location_verified: locationVerified,
+    locationVerified,
     source_url: row.source_url || '',
+    sourceUrl: row.source_url || '',
     search_text: '',
   }
 }
@@ -225,7 +252,9 @@ export function filterRowsByTerritory(rows, zoneMode, zone) {
     if (!zoneCity(zone)) return rows.filter(row => row.source_channel === 'web' && row.location_scope === 'online_national')
     return rows.filter(row => (
       (row.source_channel === 'web' && row.location_scope === 'online_national') ||
-      rowMatchesCity(row, zone)
+      (row.source_channel === 'web' && row.location_scope === 'online_unverified'
+        ? row.location_verified && rowMatchesCity(row, zone)
+        : rowMatchesCity(row, zone))
     ))
   }
 

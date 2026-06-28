@@ -84,6 +84,11 @@ function ResultCard({ row, index, maxPrice, selected, onToggleSelected, onAdd })
           {row.distance_m != null ? `${formatDistance(row.distance_m)} - ` : ''}
           {formatDate(row.date)} - {row.source_detail}
         </p>
+        {row.source_url && (
+          <a href={row.source_url} target="_blank" rel="noreferrer" className="text-xs font-black text-blue-700">
+            Ver fuente
+          </a>
+        )}
         {(row.offer_text || row.payment_condition) && (
           <p className="text-xs font-bold text-amber-700">{row.offer_text || row.payment_condition}</p>
         )}
@@ -108,6 +113,7 @@ export default function ComparePrices() {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState(null)
+  const [webApprovedCount, setWebApprovedCount] = useState(null)
   const [selectedFormatKey, setSelectedFormatKey] = useState('')
   const [selectedRows, setSelectedRows] = useState([])
   const [shoppingList, setShoppingList] = useState(() => readList())
@@ -171,12 +177,11 @@ export default function ComparePrices() {
         .from('web_price_observations')
         .select(`
           id, web_product_id, chain_name, store_id, city, commune, location_scope, location_verified,
-          normal_price, final_price, unit_price, unit_label, promotion_text, stock_status, source_url, captured_at, verification_status,
-          product:web_catalog_products!web_price_observations_web_product_id_fkey(id,product_id,name,brand,category,package_text,quantity,unit,provider),
+          normal_price, final_price, unit_price, unit_label, promotion_text, stock_status, source_url, captured_at, review_status,
+          product:web_catalog_products!web_price_observations_web_product_id_fkey(id,product_id,name,normalized_name,brand,category,package_text,quantity,unit,image_url),
           stores(*)
         `)
-        .eq('verification_status', 'approved')
-        .neq('stock_status', 'out_of_stock')
+        .eq('review_status', 'approved')
         .order('captured_at', { ascending: false })
         .limit(700)
 
@@ -215,15 +220,18 @@ export default function ComparePrices() {
           .map(row => attachLookups(row, productMap, storeMap))
           .map(unifyPriceEntry)
           .filter(Boolean)
+      const webObservationList = webRes.error ? [] : (Array.isArray(webRes.data) ? webRes.data : [])
+      setWebApprovedCount(webRes.error ? null : webObservationList.length)
       const webRows = webRes.error
         ? []
-        : (Array.isArray(webRes.data) ? webRes.data : []).map(unifyWebObservation).filter(Boolean)
+        : webObservationList.map(unifyWebObservation).filter(Boolean)
 
       setProducts(productList)
       setRows([...physicalRows, ...webRows].map(enrichSearchText))
     } catch (error) {
       console.error('EdePrecios compare load crashed:', error)
       setMessage({ type: 'error', text: `No pudimos cargar el comparador: ${error.message || 'error inesperado'}` })
+      setWebApprovedCount(null)
       setRows([])
     } finally {
       setLoading(false)
@@ -441,6 +449,12 @@ export default function ComparePrices() {
         </div>
       )}
 
+      {!loading && webApprovedCount === 0 && (
+        <div className="rounded-2xl border border-blue-100 bg-blue-50 p-3 text-sm font-semibold text-blue-800">
+          Todavia no hay precios web aprobados. Deben cargarse y aprobarse desde Precios web.
+        </div>
+      )}
+
       {loading && <div className="rounded-[2rem] bg-white p-5 text-center text-sm text-slate-500 shadow-sm">Cargando precios aprobados...</div>}
 
       {!loading && activeQuery && formatGroups.length > 1 && (
@@ -505,7 +519,7 @@ export default function ComparePrices() {
             {selectedComparisonRows.map(row => (
               <div key={`compare-${row.id}`} className="rounded-2xl bg-white p-3 text-sm shadow-sm">
                 <p className="font-black text-slate-900">{row.store_name}</p>
-                <p className="text-xs text-slate-500">{row.branch_name || 'Sucursal sin dato'}</p>
+                <p className="text-xs text-slate-500">{row.branch_name || (row.source_channel === 'web' ? row.source_detail : 'Sucursal sin dato')}</p>
                 <p className="mt-2 text-xl font-black text-blue-700">{formatCLP(row.final_price)}</p>
                 <p className="text-xs font-bold text-slate-500">Diferencia: {cheapestSelected ? formatCLP(row.final_price - cheapestSelected) : '$0'}</p>
                 <p className="text-xs text-slate-500">{row.distance_m != null ? formatDistance(row.distance_m) : 'Sin distancia'} - {formatDate(row.date)}</p>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Component, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
@@ -37,8 +37,13 @@ const KNOWN_SECTOR_NAMES = new Set([
   'la compana',
 ])
 
-function normalize(text = '') {
-  return text.toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+function normalize(value) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
 }
 
 function sim(a, b) {
@@ -165,7 +170,7 @@ function supermarketDuplicateReason(left, right) {
 }
 
 function supermarketDuplicatePairs(stores) {
-  const supermarkets = stores.filter(store => store.is_active !== false && isSupermarketStore(store))
+  const supermarkets = (Array.isArray(stores) ? stores : []).filter(store => store.is_active !== false && isSupermarketStore(store))
   const pairs = []
   for (let i = 0; i < supermarkets.length; i += 1) {
     for (let j = i + 1; j < supermarkets.length; j += 1) {
@@ -197,8 +202,7 @@ function itemKey(item) {
 }
 
 function cleanLocationValue(value) {
-  if (value == null) return null
-  const text = value.toString().trim()
+  const text = String(value ?? '').trim()
   if (!text) return null
   const normalized = normalize(text)
   if (['otro', 'otro no aparece mi sector', 'sin sector', 'sin ubicacion', 'sin ubicacion territorial'].includes(normalized)) return null
@@ -256,7 +260,7 @@ function locationSourceLabel(source) {
 }
 
 function buildUsage(entries, field) {
-  return entries.reduce((acc, entry) => {
+  return (Array.isArray(entries) ? entries : []).reduce((acc, entry) => {
     const id = entry[field]
     if (!id) return acc
     acc[id] = (acc[id] || 0) + 1
@@ -266,10 +270,11 @@ function buildUsage(entries, field) {
 
 function duplicatePairs(items, getText, minScore = 0.62) {
   const pairs = []
-  for (let i = 0; i < items.length; i += 1) {
-    for (let j = i + 1; j < items.length; j += 1) {
-      const left = items[i]
-      const right = items[j]
+  const safeItems = Array.isArray(items) ? items : []
+  for (let i = 0; i < safeItems.length; i += 1) {
+    for (let j = i + 1; j < safeItems.length; j += 1) {
+      const left = safeItems[i]
+      const right = safeItems[j]
       const a = normalize(getText(left))
       const b = normalize(getText(right))
       if (!a || !b) continue
@@ -281,7 +286,50 @@ function duplicatePairs(items, getText, minScore = 0.62) {
   return pairs.sort((a, b) => b.score - a.score).slice(0, 30)
 }
 
-export default function DataQuality() {
+function settledQuery(result, label) {
+  if (result.status === 'rejected') {
+    const error = result.reason instanceof Error ? result.reason : new Error(String(result.reason || 'Error inesperado'))
+    console.error(`EdePrecios DataQuality ${label} load crashed:`, error)
+    return { data: [], error }
+  }
+  return result.value || { data: [], error: null }
+}
+
+class DataQualityErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('EdePrecios DataQuality render failed:', error, info)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="rounded-[2rem] border border-red-100 bg-red-50 p-5 text-sm text-red-700 shadow-sm">
+          <p className="font-black">No pudimos mostrar Calidad de datos.</p>
+          <p className="mt-1">{this.state.error?.message || 'Ocurrio un error inesperado al renderizar la pagina.'}</p>
+          <button
+            type="button"
+            onClick={() => this.setState({ error: null })}
+            className="mt-4 rounded-2xl bg-red-600 px-4 py-3 text-xs font-black text-white"
+          >
+            Reintentar
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+function DataQualityContent() {
   const { isValidator, isAdmin, user } = useAuth()
   const [tab, setTab] = useState('reportes')
   const [products, setProducts] = useState([])
@@ -300,25 +348,50 @@ export default function DataQuality() {
 
   async function load() {
     setLoading(true)
-    const [p, s, e, t] = await Promise.all([
-      supabase.from('products').select('*').order('name').limit(900),
-      supabase.from('stores').select('*').order('name').limit(900),
-      supabase.from('price_entries').select('*').order('created_at', { ascending: false }).limit(240),
-      supabase.from('territorial_location_review').select('*').limit(200),
-    ])
-    if (p.error || s.error || e.error) setMessage({ type: 'error', text: p.error?.message || s.error?.message || e.error?.message })
-    if (t.error) console.warn('PriceNow territorial review view unavailable:', t.error.message)
-    setProducts(p.data || [])
-    setStores(s.data || [])
-    setEntries(e.data || [])
-    setTerritorialReview(t.data || [])
-    setLoading(false)
+    setMessage(null)
+    try {
+      const [p, s, e, t] = (await Promise.allSettled([
+        supabase.from('products').select('*').order('name').limit(900),
+        supabase.from('stores').select('*').order('name').limit(900),
+        supabase.from('price_entries').select('*').order('created_at', { ascending: false }).limit(240),
+        supabase.from('territorial_location_review').select('*').limit(200),
+      ])).map((result, index) => settledQuery(result, ['productos', 'negocios', 'reportes', 'territorio'][index]))
+
+      const errors = [
+        ['Productos', p.error],
+        ['Negocios', s.error],
+        ['Reportes', e.error],
+        ['Territorio', t.error],
+      ].filter(([, error]) => error)
+
+      errors.forEach(([label, error]) => console.error(`EdePrecios DataQuality ${label}:`, error))
+      if (errors.length) {
+        setMessage({
+          type: p.error || s.error || e.error ? 'error' : 'warning',
+          text: errors.map(([label, error]) => `${label}: ${error.message || 'No se pudo cargar'}`).join(' | '),
+        })
+      }
+
+      setProducts(Array.isArray(p.data) ? p.data : [])
+      setStores(Array.isArray(s.data) ? s.data : [])
+      setEntries(Array.isArray(e.data) ? e.data : [])
+      setTerritorialReview(Array.isArray(t.data) ? t.data : [])
+    } catch (error) {
+      console.error('EdePrecios DataQuality load failed:', error)
+      setMessage({ type: 'error', text: error.message || 'No pudimos cargar Calidad de datos.' })
+      setProducts([])
+      setStores([])
+      setEntries([])
+      setTerritorialReview([])
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => { load() }, [])
 
-  const activeProducts = products.filter(p => p.is_active !== false && !p.merged_into)
-  const activeStores = stores.filter(s => s.is_active !== false && !s.merged_into)
+  const activeProducts = (Array.isArray(products) ? products : []).filter(p => p.is_active !== false && !p.merged_into)
+  const activeStores = (Array.isArray(stores) ? stores : []).filter(s => s.is_active !== false && !s.merged_into)
   const productUsage = useMemo(() => buildUsage(entries, 'product_id'), [entries])
   const storeUsage = useMemo(() => buildUsage(entries, 'store_id'), [entries])
 
@@ -681,7 +754,17 @@ export default function DataQuality() {
         </div>
       </section>
 
-      {message && <div className={`rounded-2xl border p-3 text-sm font-semibold ${message.type === 'error' ? 'border-red-100 bg-red-50 text-red-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>{message.text}</div>}
+      {message && (
+        <div className={`rounded-2xl border p-3 text-sm font-semibold ${
+          message.type === 'error'
+            ? 'border-red-100 bg-red-50 text-red-700'
+            : message.type === 'warning'
+              ? 'border-amber-100 bg-amber-50 text-amber-700'
+              : 'border-emerald-100 bg-emerald-50 text-emerald-700'
+        }`}>
+          {message.text}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-100 p-1 text-xs font-black sm:grid-cols-6">
         {[
@@ -1014,5 +1097,13 @@ export default function DataQuality() {
         </section>
       )}
     </div>
+  )
+}
+
+export default function DataQuality() {
+  return (
+    <DataQualityErrorBoundary>
+      <DataQualityContent />
+    </DataQualityErrorBoundary>
   )
 }
